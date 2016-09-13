@@ -17,6 +17,7 @@
 # 2014-09-14	Thomas BAECKEROOT	CREATION
 #		(tbaecker.spam@gmail.com)
 #------------------------------------------------------------------------------
+# 2016-09-13    Thomas BAECKEROOT       Init of git repo
 #
 ###############################################################################
 print("Starting automatic panorama creation...")
