@@ -6,6 +6,7 @@ print("Hugin Scripting Interface - Basic test of hsi scripts.")
 
 def main(photoFolder):
 
+	# from sys import argv      # Not necessary yet
 	from hsi import *         # load the module
 	p=Panorama()              # make a new Panorama object
 	ifs=ifstream('datatest/existing_panorama_file.pto')    # create a C++ std::ifstream
