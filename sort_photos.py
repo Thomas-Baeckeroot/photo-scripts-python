@@ -10,7 +10,6 @@ from datetime import datetime
 from time import sleep
 import subprocess
 import glob
-import shutil
 
 # import sys
 # sys.path.insert(1, '/home/thomas/Applications/GPicSync/src')  # path to gpicsync.py
@@ -35,18 +34,21 @@ MIN_TIME_BETWEEN_PANOS = 15  # Can be corrected between 19 and 7.5...
 logging.basicConfig(
     # filename=utils.get_home() + "/tmp/logfile.log",
     level=logging.DEBUG,
-    format='%(asctime)s\t%(levelname)s\t%(name)s\t%(message)s')
-log = logging.getLogger("sort_photos.py")
+    format='%(asctime)s\t%(levelname)s\t%(filename)s:%(lineno)d\t%(message)s')
+log = logging.getLogger("sort_photos.py")  # %(name)s
 
 
 def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
-    latest_file = max(list_of_files, key=os.path.getctime)
-    
-    log.info("\nlatest_file: '" + str(latest_file) + "'")
-    type(latest_file)
-    
-    return str(latest_file)  # FIXME Should be "../abc.gpx"
+    log.debug(list_of_files)
+    if len(list_of_files) == 0:
+        log.warning("\nlatest_file: No GPX file found!")
+        return None
+    else:
+        latest_file = max(list_of_files, key=os.path.getctime)
+        log.info("\nlatest_file: '" + str(latest_file) + "'")
+        # type(latest_file)
+        return str(latest_file)  # FIXME Should be "../abc.gpx"
 
 
 def get_exif(file_name):
@@ -162,87 +164,91 @@ def move_raws(photo_folder):
             os.rename(photo_folder + fichierBrut, photo_folder + FOLDER_FOR_RAWS + "/" + fichierBrut)
 
 
-def sort_photos(photo_folder):
+def geotag_pictures(photo_folder):
 
-    # Normaliser photoFolder (ajout de '/' si non present a la fin):
-    if photo_folder[len(photo_folder) - 1] != '/':
-        photo_folder = photo_folder + '/'
-
-    move_raws(photo_folder)
-
-    (fichiers_bruts, fichiers_images, fichier_gpx) = get_files(photo_folder)
+    (fichiers_bruts, fichiers_images, file_gpx) = get_files(photo_folder)
 
     log.info("                            _______________________")
     log.info("===========================[ Géo-taggage des jpegs ]===========================")
 
-    if fichier_gpx == '':
-        fichier_gpx_with_folder = get_newest_gpx_in_parent(photo_folder)
+    if file_gpx == '':
+        file_gpx_with_folder = get_newest_gpx_in_parent(photo_folder)
     else:
-        fichier_gpx_with_folder = photo_folder + fichier_gpx
-    
-    offset = "+2"  # +2 for summertime with 550D (CEST), +1 for (winter)time with 550D (CET)
-    # gpysync_cmd = "python ~/Applications/GPicSync/src/gpicsync.py" \
-    #              + " --directory='" + photo_folder \
-    #              + "' --gpx='" + fichier_gpx_with_folder \
-    #              + "' --offset=" + offset \
-    #              + " --time-range=3000"
-    # subprocess.call(
-    #     gpysync_cmd,
-    #     shell=True)
-    log.info("Launching GPicSync...")
-    child = subprocess.Popen(
-        ["python", "/home/thomas/Applications/GPicSync/src/gpicsync.py",
-         "--directory=" + photo_folder,
-         "--gpx=" + fichier_gpx_with_folder,
-         "--offset=" + offset,
-         "--time-range=3000"]
-        # , stdout=subprocess.PIPE
-    )
-    streamdata = child.communicate()[0]
-    log.debug("Waiting for Return Code from GPicSync...")
-    rc = child.returncode
-    # log.debug("GPicSync stdout:")  # .format(str(streamdata)))
-    # print(streamdata)
-    if rc == 0:
-        log.info("GPicSync -> return code = {0}".format(rc))
-    else:
-        log.warning(ERROR + "GPicSync -> return code = {0}".format(rc))
-    sleep(5)  # Wait a bit for files to be effectively written (if not waiting, files *_original are not moved)
+        file_gpx_with_folder = photo_folder + file_gpx
 
-    # move_raws(photo_folder)  # Done before geo-tagging
+    if file_gpx_with_folder:  # variable defined (not None)
 
-    # D'après http://stackoverflow.com/questions/3781851/run-a-python-script-from-another-python-script-passing-in-args
-    # il serait mieux d'utiliser de __main__ de gpicsync.py
-    # => Tentative ci-dessous, mais programation de GPicSync incertaine...
+        # +2 for summertime with 550D (CEST)
+        # +1 for (winter)time with 550D (CET)
+        # +1 for summer time in Portugal
+        # +0 for winter time in Portugal
+        offset = "+1"
+        # gpysync_cmd = "python ~/Applications/GPicSync/src/gpicsync.py" \
+        #              + " --directory='" + photo_folder \
+        #              + "' --gpx='" + file_gpx_with_folder \
+        #              + "' --offset=" + offset \
+        #              + " --time-range=3000"
+        # subprocess.call(
+        #     gpysync_cmd,
+        #     shell=True)
+        log.info("Launching GPicSync...")
+        child = subprocess.Popen(
+            ["python", "/home/thomas/Applications/GPicSync/src/gpicsync.py",
+             "--directory=" + photo_folder,
+             "--gpx=" + file_gpx_with_folder,
+             "--offset=" + offset,
+             "--time-range=3000"]
+            # , stdout=subprocess.PIPE
+        )
+        streamdata = child.communicate()[0]  # Unused value but required to wait for end of process ?
+        log.debug("Waiting for Return Code from GPicSync...")
+        rc = child.returncode
+        # log.debug("GPicSync stdout:")  # .format(str(streamdata)))
+        # print(streamdata)
+        if rc == 0:
+            log.info("GPicSync -> return code = {0}".format(rc))
+        else:
+            log.warning(ERROR + "GPicSync -> return code = {0}".format(rc))
+        sleep(5)  # Wait a bit for files to be effectively written (if not waiting, files *_original are not moved)
 
-    # options_dir = photo_folder  # --directory
-    # options_gpx = [fichier_gpx_with_folder]  # --gpx
-    # options_offset = offset  # --offset=
-    # options_timerange = 3000  # --time-range
-    #
-    # options_qr_time_image = None
-    #
-    # log.debug("Launching GPicSync with GPX file '{0}'".format(options_gpx))
-    # geo = gpicsync.GpicSync(gpxFile=options_gpx,
-    #                         # tcam_l=options_tcam,
-    #                         # tgps_l=options_tgps,
-    #                         UTCoffset=float(options_offset),
-    #                         timerange=int(options_timerange),
-    #                         # timezone=options_timezone,
-    #                         qr_time_image=options_qr_time_image)
-    #
-    # log.debug("Launching GPicSync with FileList from '{0}'".format(options_dir))
-    # files = list(gpicsync.getFileList(options_dir))
-    #
-    # if options_qr_time_image is not None:
-    #     qr_time_images = [(options_qr_time_image, options_qr_time_image)]
-    #     if options_qr_time_image == 'auto':
-    #         qr_time_images = files
-    #     geo.parseQrTime(qr_time_images)
-    #
-    # for fileName, filePath in files:
-    #     print("\nFound fileName ", fileName, " Processing now ...")
-    #     geo.syncPicture(filePath)[0]
+        # move_raws(photo_folder)  # Done before geo-tagging
+
+        # D'après
+        # http://stackoverflow.com/questions/3781851/run-a-python-script-from-another-python-script-passing-in-args
+        # il serait mieux d'utiliser de __main__ de gpicsync.py
+        # => Tentative ci-dessous, mais programation de GPicSync incertaine...
+
+        # options_dir = photo_folder  # --directory
+        # options_gpx = [file_gpx_with_folder]  # --gpx
+        # options_offset = offset  # --offset=
+        # options_timerange = 3000  # --time-range
+        #
+        # options_qr_time_image = None
+        #
+        # log.debug("Launching GPicSync with GPX file '{0}'".format(options_gpx))
+        # geo = gpicsync.GpicSync(gpxFile=options_gpx,
+        #                         # tcam_l=options_tcam,
+        #                         # tgps_l=options_tgps,
+        #                         UTCoffset=float(options_offset),
+        #                         timerange=int(options_timerange),
+        #                         # timezone=options_timezone,
+        #                         qr_time_image=options_qr_time_image)
+        #
+        # log.debug("Launching GPicSync with FileList from '{0}'".format(options_dir))
+        # files = list(gpicsync.getFileList(options_dir))
+        #
+        # if options_qr_time_image is not None:
+        #     qr_time_images = [(options_qr_time_image, options_qr_time_image)]
+        #     if options_qr_time_image == 'auto':
+        #         qr_time_images = files
+        #     geo.parseQrTime(qr_time_images)
+        #
+        # for fileName, filePath in files:
+        #     print("\nFound fileName ", fileName, " Processing now ...")
+        #     geo.syncPicture(filePath)[0]
+
+    else:  # from "if file_gpx_with_folder" => file_gpx_with_folder is None
+        log.info("No GPX file usable => GPicSync not launched.")
 
     # Si des sauvegardes (backup) des photos ont été crées, on les déplace vers un nouveau dossier
     fichiers_backup = glob.glob(photo_folder + '*_original')  # all backuped files within the directory
@@ -265,11 +271,10 @@ def sort_photos(photo_folder):
             log.info("\tDeplacement de %s..." % fichierBackup)
             # try:
             os.rename(fichierBackup, fichierBackup.replace(photo_folder, photo_folder + FOLDER_BACKUP_GPS + "/"))
-            # shutil.move(fichierBackup, photo_folder + FOLDER_BACKUP_GPS + "/")  # FIXME Replaced with os.rename
-            # except FileNotFoundError:  # or higher level FileError
-            #     log.info(
-            #         "Warning: Error happened when trying to move backup file to backup folder. "
-            #         +"Does a previous backup exist in destination folder?")
+
+
+def group_pictures_by_time(photo_folder):
+    (fichiers_bruts, fichiers_images, file_gpx) = get_files(photo_folder)
 
     log.info("                    _______________________________________")
     log.info("===================[ Traitement des images jpegs restantes ]===================")
@@ -290,11 +295,11 @@ def sort_photos(photo_folder):
         # time_org_capture_began.append(os.stat(photoFolder+fichierImage).st_mtime)
         date_time_org_image = get_date_time_original_from_exif(photo_folder + fichierImage)
         time_org_capture_began.append(date_time_org_image)
-        
+
         # FIXME Once get_exposure_time_from_exif() is fixed, uncomment and resolve below:
         # time_org_capture_ended.append(date_time_org_image + get_exposure_time_from_exif(photo_folder + fichierImage))
         time_org_capture_ended.append(date_time_org_image)
-        
+
         if i == 0:
             # First picture => time from previous = 9999 sec.
             time_from_previous_image.append(9999)
@@ -317,14 +322,13 @@ def sort_photos(photo_folder):
         # (i, len(series_of_photos), fichierImage,
         #  time_org_capture_began[i], time_from_previous_image[i], marque_separateur ))
         log.info("%d\t%d\t%s\t%s\t%s\t%s" % (i,
-                                          len(series_of_photos),
-                                          fichierImage,
-                                          time_org_capture_began[i],
-                                          time_from_previous_image[i],
-                                          marque_separateur))
+                                             len(series_of_photos),
+                                             fichierImage,
+                                             time_org_capture_began[i],
+                                             time_from_previous_image[i],
+                                             marque_separateur))
 
     # log.info(series_of_photos)
-
     for serie_of_photos in series_of_photos:
         n_photo_in_serie = len(serie_of_photos)
         serie_is_hdr = False
@@ -378,13 +382,13 @@ def sort_photos(photo_folder):
 
             # The set of pictures is now in folder, ready to be computed
             if not serie_is_hdr:
-                createPanosScript = photo_folder + "createPanosScript.sh"
-                if os.path.exists(createPanosScript):
-                    append_write = 'a' # append if already exists
+                create_panos_script = photo_folder + "create_panos_script.sh"
+                if os.path.exists(create_panos_script):
+                    append_write = 'a'  # append if already exists
                 else:
-                    append_write = 'w' # make a new file if not
-                
-                with open(createPanosScript, append_write) as create_panos_script:
+                    append_write = 'w'  # make a new file if not
+
+                with open(create_panos_script, append_write) as create_panos_script:
                     create_panos_script.writelines(
                         "nice -n 19 ~/python/create_panorama.py \"" + photo_folder + subfolder_name + "/\"\n"
                     )
@@ -396,7 +400,20 @@ def sort_photos(photo_folder):
     log.info("Terminated.")
     log.info("")
     log.info("Panorama may have been added in:")
-    log.info("cat /home/thomas/Images/2017\\ PegASUS\\ seul/createPanosScript.sh")
+    log.info("cat /home/thomas/Images/2017\\ PegASUS\\ seul/create_panos_script.sh")
+
+
+def sort_photos(photo_folder):
+
+    # Normaliser photoFolder (ajout de '/' si non present a la fin):
+    if photo_folder[len(photo_folder) - 1] != '/':
+        photo_folder = photo_folder + '/'
+
+    move_raws(photo_folder)
+
+    geotag_pictures(photo_folder)
+
+    group_pictures_by_time(photo_folder)
 
 # Codes de sortie:
 #   0    Sortie normale
