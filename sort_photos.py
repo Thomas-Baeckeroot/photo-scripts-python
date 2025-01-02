@@ -7,14 +7,8 @@ from sys import argv
 from PIL import Image
 from PIL.ExifTags import TAGS
 from datetime import datetime
-from time import sleep
 import subprocess
 import glob
-
-# import sys
-# sys.path.insert(1, '/home/thomas/Applications/GPicSync/src')  # path to gpicsync.py
-# import gpicsync
-# import fnmatch  # for gpicsync.getFileList(options_dir)
 
 # CONSTANTS:
 ERROR = '\033[1;31mError:\033[0m '
@@ -56,9 +50,17 @@ def get_exif(file_name):
     ret = {}
     i = Image.open(file_name)
     info = i._getexif()
-    for tag, value in info.items():
-        decoded = TAGS.get(tag, tag)
-        ret[decoded] = value
+    if not info:
+        # Have a try if .getexif() works better:
+        info = i.getexif()
+        if info:
+            log.warning("Method .getexif() worked while ._getexit() failed for file '" + file_name + "'")
+    if info :
+        for tag, value in info.items():
+            decoded = TAGS.get(tag, tag)
+            ret[decoded] = value
+    else:
+        log.warning("Unable to get exif information from file '" + file_name + "' (returning empty dictionary).")
     return ret
 
 
@@ -102,7 +104,12 @@ def get_date_time_original_from_exif(file_name):
     # DateTime = 2016:11:06 00:30:48
     _EXIF_TIME_FORMAT = '%Y:%m:%d %H:%M:%S'
     exif_of_file_name = get_exif(file_name)
-    dt_original_unicode = exif_of_file_name['DateTimeOriginal']
+    try:
+        dt_original_unicode = exif_of_file_name['DateTimeOriginal']
+    except KeyError:
+        log.error("KeyError occurred when trying to find exif parameter 'DateTimeOriginal' from file '" + file_name
+                  + "' (returning None as datetime).")
+        return None
     # log.info("get_date_time_original_from_exif(%r)" % fileName)
     # log.info("    dt_original_unicode = %r" % dt_original_unicode)
     ret = datetime.strptime(dt_original_unicode, _EXIF_TIME_FORMAT)
@@ -135,14 +142,6 @@ def get_files(photo_folder):
 def move_raws(photo_folder):
     log.info("===[ Recherche de fichiers Bruts puis déplacement dans le dossier adéquat ]====")
 
-    # RED='\033[0;31m'
-    # NC='\033[0m' # No Color
-    # printf "I ${RED}love${NC} Stack Overflow\n"
-    # RED='\033[1;31m'
-    # printf "I ${RED}love${NC} Stack Overflow\n"
-    # ERROR='\033[1;31mError\033[0m'
-    # printf "I ${ERROR}.\n"
-
     # Obtenir la liste des images brutes:
     (fichiers_bruts, fichiers_images, fichier_gpx) = get_files(photo_folder)
 
@@ -164,6 +163,40 @@ def move_raws(photo_folder):
             os.rename(photo_folder + fichierBrut, photo_folder + FOLDER_FOR_RAWS + "/" + fichierBrut)
 
 
+def geotag_move_backups(photo_folder):
+    # sleep(5)  # Wait a bit for files to be effectively written (if not waiting, files *_original are not moved)
+    # Si des sauvegardes (backup) des photos ont été crées, on les déplace vers un nouveau dossier
+    backup_files = glob.glob(photo_folder + '*_original')  # get backup files within the directory
+    log.info("Found Backup files by geo-tag: {0}".format(backup_files))
+    while len(backup_files) > 0:
+        log.info("Backup files by geo-tag: {0}".format(backup_files))
+        # Create 'Backups' folder is not existing yet:
+        if os.path.isdir(photo_folder + FOLDER_BACKUP_GPS):
+            log.info("Folder '%r' for backup pictures already exists." % FOLDER_BACKUP_GPS)
+        else:
+            log.info("Create folder '%r' for backup pictures..." % FOLDER_BACKUP_GPS)
+            os.mkdir(photo_folder + FOLDER_BACKUP_GPS)
+
+        # Deplacer les images *_backup* vers le dossier des sauvegardes
+        log.info("Déplacement des fichiers originaux (avant géo-taggage):")
+        for fichierBackup in backup_files:
+            log.info("\tDeplacement de %s..." % fichierBackup)
+            # try:
+            os.rename(fichierBackup, fichierBackup.replace(photo_folder, photo_folder + FOLDER_BACKUP_GPS + "/"))
+        # Due to some files being missed sometime, we're getting again list of original files that may have been missed
+        # in first call (just over 'while'):
+        backup_files = glob.glob(photo_folder + '*_original')  # get backup files within the directory
+
+
+def get_time_shift():
+    # +2 for summer time with 550D (CEST)
+    # +1 for (winter) time with 550D (CET)
+    # +1 for summer time in Portugal
+    # +0 for winter time in Portugal
+    # -3 for summer time in Brasil/Curitiba
+    return input('Please inform time offset (timezone) as "+n" ("+1" will be used as default): ') or "+1"
+
+
 def geotag_pictures(photo_folder):
 
     (fichiers_bruts, fichiers_images, file_gpx) = get_files(photo_folder)
@@ -178,11 +211,7 @@ def geotag_pictures(photo_folder):
 
     if file_gpx_with_folder:  # variable defined (not None)
 
-        # +2 for summertime with 550D (CEST)
-        # +1 for (winter)time with 550D (CET)
-        # +1 for summer time in Portugal
-        # +0 for winter time in Portugal
-        offset = "+1"
+        offset = get_time_shift()
         # gpysync_cmd = "python ~/Applications/GPicSync/src/gpicsync.py" \
         #              + " --directory='" + photo_folder \
         #              + "' --gpx='" + file_gpx_with_folder \
@@ -209,9 +238,6 @@ def geotag_pictures(photo_folder):
             log.info("GPicSync -> return code = {0}".format(rc))
         else:
             log.warning(ERROR + "GPicSync -> return code = {0}".format(rc))
-        sleep(5)  # Wait a bit for files to be effectively written (if not waiting, files *_original are not moved)
-
-        # move_raws(photo_folder)  # Done before geo-tagging
 
         # D'après
         # http://stackoverflow.com/questions/3781851/run-a-python-script-from-another-python-script-passing-in-args
@@ -250,27 +276,7 @@ def geotag_pictures(photo_folder):
     else:  # from "if file_gpx_with_folder" => file_gpx_with_folder is None
         log.info("No GPX file usable => GPicSync not launched.")
 
-    # Si des sauvegardes (backup) des photos ont été crées, on les déplace vers un nouveau dossier
-    fichiers_backup = glob.glob(photo_folder + '*_original')  # all backuped files within the directory
-    log.info("Fichiers modifiés (géo-tag): {0}".format(fichiers_backup))
-    if len(fichiers_backup) == 0:
-        log.info("INFO:\tAucun fichier de sauvegarde trouvé (aucun fichier géo-taggué?)")
-    else:
-        # Crée les repertoire 'Backups' si encore inexistant
-        if os.path.isdir(photo_folder + FOLDER_BACKUP_GPS):
-            log.warning("WARNING!\tLe dossier %r existe deja." % FOLDER_BACKUP_GPS)
-        else:
-            log.info("Creation du dossier %r..." % FOLDER_BACKUP_GPS)
-            os.mkdir(photo_folder + FOLDER_BACKUP_GPS)
-        # FIXME Some files were missed (not moved)
-        sleep(5)
-
-        # Deplacer les images *_backup* vers le dossier des sauvegardes
-        log.info("Déplacement des fichiers originaux (avant géo-taggage):")
-        for fichierBackup in fichiers_backup:
-            log.info("\tDeplacement de %s..." % fichierBackup)
-            # try:
-            os.rename(fichierBackup, fichierBackup.replace(photo_folder, photo_folder + FOLDER_BACKUP_GPS + "/"))
+    geotag_move_backups(photo_folder)
 
 
 def group_pictures_by_time(photo_folder):
@@ -290,8 +296,6 @@ def group_pictures_by_time(photo_folder):
     log.info("Photo\tSerie\t     fichier\t          \tprecedente (s)")
     for fichierImage in fichiers_images:
         i = len(time_from_previous_image)
-        # Based on file creation time (works fine when geo-tagged but not if not??)
-        # TODO Should be based on EXIF information
         # time_org_capture_began.append(os.stat(photoFolder+fichierImage).st_mtime)
         date_time_org_image = get_date_time_original_from_exif(photo_folder + fichierImage)
         time_org_capture_began.append(date_time_org_image)
@@ -302,6 +306,8 @@ def group_pictures_by_time(photo_folder):
 
         if i == 0:
             # First picture => time from previous = 9999 sec.
+            time_from_previous_image.append(9999)
+        elif (time_org_capture_began[i] is None) or (time_org_capture_ended[i - 1] is None):
             time_from_previous_image.append(9999)
         else:
             #  EXACT time between 2 pictures =
