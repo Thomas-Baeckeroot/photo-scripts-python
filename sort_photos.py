@@ -1,26 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+This script is expected to be launched right after having downloaded pictures from digital camera.
+It aims to organize raw files in a separated folder,
+group set of pictures in one folder,
+geo-tags pictures if a .gpx file is given.
+
+The expected folder (before) is as:
+/Image-root
+    /2024                 (year)
+        /2024-06-15_Day-short-description
+            /RAW          (will be created by script)
+"""
+
+import configparser
+import glob
 import logging
 import os
-from sys import argv
+import subprocess
+
+from datetime import datetime
 from PIL import Image
 from PIL.ExifTags import TAGS
-from datetime import datetime
-import subprocess
-import glob
+from sys import argv
 
 # CONSTANTS:
 ERROR = '\033[1;31mError:\033[0m '
-
-# Dossier vers lequel seront deplaces les fichiers bruts (sans '/' final):
-FOLDER_FOR_RAWS = "BRUTS"
+# Return codes:
+#   0    Normal exit
+#  -1    Invalid number of arguments
+#  -2    Folder given as picture folder is not detected as a valid folder
+RC_ATTRIBUTES_ERROR = -1
+RC_PATH_ERROR = -2
 
 # Folder to which backups of photos will be moved before applying geo-tagging
 # (relative to photoFolder, without final '/'):
 FOLDER_BACKUP_GPS = "BackupBeforeGPS!AE!"
 
-# Temps MAXI entre chaque photo d'un panorama (en secondes):
+# MAXIMUM time allowed between each picture of a panorama (in seconds):
 MIN_TIME_BETWEEN_PANOS = 15  # Can be corrected between 19 and 7.5...
 # 13.5 was considered good for a good time
 # For room panorama, up to 40 s. were needed between 2 shots.
@@ -30,6 +48,25 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s\t%(levelname)s\t%(filename)s:%(lineno)d\t%(message)s')
 log = logging.getLogger("sort_photos.py")  # %(name)s
+
+config = configparser.ConfigParser()
+config.setdefaults({'Folders': {
+    'root': '~/Images',
+    'raw': 'RAW'
+}})
+
+config_path = os.path.expanduser('~/.config/sort_photo.conf')
+config.read(config_path)
+
+root_folder = os.path.expanduser(config['Folders']['root'])
+# Folder where raw files will be moved to (without final '/'):
+FOLDER_FOR_RAWS = os.path.join(root_folder, config['Folders']['raw'])
+
+# Example of config file sort_photo.conf with default values:
+#
+# [Folders]
+# root = ~/Images
+# raw = RAW
 
 
 def get_newest_gpx_in_parent(folder):
@@ -54,13 +91,13 @@ def get_exif(file_name):
         # Have a try if .getexif() works better:
         info = i.getexif()
         if info:
-            log.warning("Method .getexif() worked while ._getexit() failed for file '" + file_name + "'")
+            log.warning(f"Method .getexif() worked while ._getexit() failed for file '{file_name}'")
     if info :
         for tag, value in info.items():
             decoded = TAGS.get(tag, tag)
             ret[decoded] = value
     else:
-        log.warning("Unable to get exif information from file '" + file_name + "' (returning empty dictionary).")
+        log.warning(f"Unable to get exif information from file '{file_name}' (returning empty dictionary).")
     return ret
 
 
@@ -97,7 +134,7 @@ def get_date_time_original_from_exif(file_name):
     #  DateTime            **      time the file was changed
     #  DateTimeDigitized   *       time when the image was stored as digital data
     # Get exposure time (in seconds) of file given in parameter from exif information
-    # Times are always from the BEGINING of the capture (make total sense for long exposures)
+    # Times are always from the BEGINNING of the capture (make total sense for long exposures)
     # To determine: picture 4029 STARTED to be taken at 2016-11-06 00:30:~49 and ENDED at 00:31:~19
     # DateTimeOriginal = 2016:11:06 00:30:48
     # DateTimeDigitized = 2016:11:06 00:30:48
@@ -107,8 +144,8 @@ def get_date_time_original_from_exif(file_name):
     try:
         dt_original_unicode = exif_of_file_name['DateTimeOriginal']
     except KeyError:
-        log.error("KeyError occurred when trying to find exif parameter 'DateTimeOriginal' from file '" + file_name
-                  + "' (returning None as datetime).")
+        log.error(f"KeyError occurred when trying to find exif parameter 'DateTimeOriginal' "
+                  f"from file '{file_name}' (returning None as datetime).")
         return None
     # log.info("get_date_time_original_from_exif(%r)" % fileName)
     # log.info("    dt_original_unicode = %r" % dt_original_unicode)
@@ -119,34 +156,35 @@ def get_date_time_original_from_exif(file_name):
 
 
 def get_files(photo_folder):
-    # Obtenir la liste des images brutes:
-    contenu_dossier = sorted(os.listdir(photo_folder))
-    log.info("%d fichiers trouves dans le dossier %r" % (len(contenu_dossier), photo_folder))
+    # Obtain list of raw files:
+    folder_content = sorted(os.listdir(photo_folder))
+    log.info(f"{len(folder_content)} fichiers trouves dans le dossier {photo_folder}")
 
-    # Creer la liste des fichiers BRUTS:
-    fichiers_bruts = list()
-    fichiers_images = list()
-    fichier_gpx = ''
-    for fileName in contenu_dossier:
-        if fileName[-4:] == '.CR2' or fileName[-4:] == '.cr2':
-            fichiers_bruts.append(fileName)
-        elif fileName[-4:] == '.JPG' or fileName[-4:] == '.jpg':
-            fichiers_images.append(fileName)
-        elif fileName[-4:] == '.GPX' or fileName[-4:] == '.gpx':
-            fichier_gpx = fileName
+    # Create list of RAW files:
+    raw_files = list()
+    picture_files = list()
+    gpx_file = ''
+    for file_name in folder_content:
+        file_ext = file_name[-4:].lower()
+        if file_ext in {'.crw', '.cr2', '.cr3', '.nef'}:
+            raw_files.append(file_name)
+        elif file_ext in {'.jpg', '.jpeg', '.heif', '.avif'}:
+            picture_files.append(file_name)
+        elif file_ext == '.gpx':
+            gpx_file = file_name
         else:
+            log.warning(f"Unable to determine type of file '{file_name}' (file will be ignored).")
             pass
-    return fichiers_bruts, fichiers_images, fichier_gpx
+    return raw_files, picture_files, gpx_file
 
 
 def move_raws(photo_folder):
     log.info("===[ Recherche de fichiers Bruts puis déplacement dans le dossier adéquat ]====")
 
-    # Obtenir la liste des images brutes:
-    (fichiers_bruts, fichiers_images, fichier_gpx) = get_files(photo_folder)
+    # Get list of raw files:
+    (raw_files, picture_files, gpx_file) = get_files(photo_folder)
 
-    # Si la liste des images brutes n'est pas vide:
-    if len(fichiers_bruts) == 0:
+    if len(raw_files) == 0:
         log.info("INFO:\tAucun fichier brut trouve")
     else:
         # Crée les repertoire 'BRUTS' si encore inexistant
@@ -158,7 +196,7 @@ def move_raws(photo_folder):
 
         # Deplacer les images *.CR2 vers BRUTS
         log.info("Deplacement des fichiers bruts:")
-        for fichierBrut in fichiers_bruts:
+        for fichierBrut in raw_files:
             log.info("\tDéplacement de %s..." % fichierBrut)
             os.rename(photo_folder + fichierBrut, photo_folder + FOLDER_FOR_RAWS + "/" + fichierBrut)
 
@@ -189,8 +227,8 @@ def geotag_move_backups(photo_folder):
 
 
 def get_time_shift():
-    # +2 for summer time with 550D (CEST)
-    # +1 for (winter) time with 550D (CET)
+    # +2 for CEST (summer time for Paris, ...)
+    # +1 for CET (winter time for Paris, ...)
     # +1 for summer time in Portugal
     # +0 for winter time in Portugal
     # -3 for summer time in Brasil/Curitiba
@@ -317,7 +355,7 @@ def group_pictures_by_time(photo_folder):
             time_from_previous_image.append((time_org_capture_began[i] - time_org_capture_ended[i - 1]).total_seconds())
 
         if time_from_previous_image[i] > MIN_TIME_BETWEEN_PANOS:
-            # Alors on a une nouvelle serie
+            # Then we have a new set of picture:
             series_of_photos.append(list())
             marque_separateur = "^^^^^^^^^^"
         else:
@@ -409,8 +447,20 @@ def group_pictures_by_time(photo_folder):
     log.info("cat /home/thomas/Images/2017\\ PegASUS\\ seul/create_panos_script.sh")
 
 
-def sort_photos(photo_folder):
+def create_avif_for_raws(photo_folder):
+    """Check if a raw that is not part of a panorama has a jpeg/avif picture in photo folder.
+    If none, a default one will be created from raw."""
+    return
 
+
+def sort_photos(photo_folder: str, gpx_file: str) -> None:
+    """
+
+
+    :param photo_folder:
+    :param gpx_file:
+    :return:
+    """
     # Normaliser photoFolder (ajout de '/' si non present a la fin):
     if photo_folder[len(photo_folder) - 1] != '/':
         photo_folder = photo_folder + '/'
@@ -421,10 +471,9 @@ def sort_photos(photo_folder):
 
     group_pictures_by_time(photo_folder)
 
-# Codes de sortie:
-#   0    Sortie normale
-#  -1    Nombre d'arguments invalides
-#  -2    Premier argument (dossier de base des photos) non detecte comme dossier valide.
+    # create_avif_for_raws(photo_folder)
+
+    return
 
 
 if __name__ == "__main__":
@@ -436,18 +485,25 @@ if __name__ == "__main__":
     nbArg = len(argList) - 1
     log.info("%d arguments reçus: %r" % (nbArg, argList))
     # Test la validite des arguments:
-    if nbArg != 1:
-        log.critical('\033[1;31mError\033[0m')
-        log.critical("%s ne s'attend qu'a un seul attribut contenant le chemin (absolu)." % argList[0])
-        log.critical("Nombre d'arguments detectes = %d (contre 1 seul attendu)" % nbArg)
-        exit(-1)
+    if nbArg < 1 or nbArg > 2:
+        log.critical(ERROR)
+        log.critical("%s requires 1 or 2 arguments:" % argList[0])
+        log.critical("%s pictures_path [gpx_path]" % argList[0])
+        log.critical("Where:")
+        log.critical("- pictures_path is the path where the pictures to sort are")
+        log.critical("- gpx_path is the path of the gpx track file (optional)")
+        exit(RC_ATTRIBUTES_ERROR)
 
     # Repertoire à analyser:
-    photoFolder = argList[1]
+    photo_folder = argList[1]
+    if nbArg > 1:
+        gpx_file = argList[2]
+    else:
+        gpx_file = None
 
-    if not os.path.isdir(photoFolder):
+    if not os.path.isdir(photo_folder):
         log.error("Le dossier passe en argument n'a pas ete reconnu comme valide:")
-        log.error("%r n'est pas un dossier valide." % photoFolder)
-        exit(-2)
+        log.error("%r n'est pas un dossier valide." % photo_folder)
+        exit(RC_PATH_ERROR)
 
-    sort_photos(photoFolder)
+    sort_photos(photo_folder, gpx_file)

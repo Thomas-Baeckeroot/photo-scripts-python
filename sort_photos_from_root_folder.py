@@ -44,7 +44,7 @@ def main(photo_root_folder):
                         print("*    Start sorting folder \"" + currentfolder + "\"")
                         columns = os.environ.get('COLUMNS', 80)
                         print("★" * columns)
-                        sort_photos.sort_photos(currentfolder)
+                        sort_photos.sort_photos(currentfolder, None)
                         print("★" * columns)
                         # print("★*    Create folder \"" + raw_folder + "\"")
                         # fixme os.makedirs(currentfolder + os.sep + raw_folder)
