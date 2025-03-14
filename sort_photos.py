@@ -21,7 +21,7 @@ import os
 import subprocess
 
 from datetime import datetime
-from PIL import Image
+from PIL import Image  # If PIL module not installed, then: `pip install Pillow`, soon pillow-avif-plugin will also be required
 from PIL.ExifTags import TAGS
 from sys import argv
 
@@ -62,11 +62,18 @@ root_folder = os.path.expanduser(config['Folders']['root'])
 # Folder where raw files will be moved to (without final '/'):
 FOLDER_FOR_RAWS = os.path.join(root_folder, config['Folders']['raw'])
 
+
 # Example of config file sort_photo.conf with default values:
 #
 # [Folders]
 # root = ~/Images
 # raw = RAW
+
+
+def log_title(title):
+    log.info(" " * 20 + "┌" + "─" * (2 + len(title)) + "┐")
+    log.info("╒" + "═" * 19 + "╡ " + title + " ╞" + "═" * 19 + "╕")
+    log.info("│" + " " * 19 + "└" + "─" * (2 + len(title)) + "┘" + " " * 19 + "│")
 
 
 def get_newest_gpx_in_parent(folder):
@@ -92,7 +99,7 @@ def get_exif(file_name):
         info = i.getexif()
         if info:
             log.warning(f"Method .getexif() worked while ._getexit() failed for file '{file_name}'")
-    if info :
+    if info:
         for tag, value in info.items():
             decoded = TAGS.get(tag, tag)
             ret[decoded] = value
@@ -158,7 +165,7 @@ def get_date_time_original_from_exif(file_name):
 def get_files(photo_folder):
     # Obtain list of raw files:
     folder_content = sorted(os.listdir(photo_folder))
-    log.info(f"{len(folder_content)} fichiers trouves dans le dossier {photo_folder}")
+    log.info(f"{len(folder_content)} files found in folder {photo_folder}")
 
     # Create list of RAW files:
     raw_files = list()
@@ -179,26 +186,25 @@ def get_files(photo_folder):
 
 
 def move_raws(photo_folder):
-    log.info("===[ Recherche de fichiers Bruts puis déplacement dans le dossier adéquat ]====")
+    log_title("Search for raw files for moving to adequate folder")
 
     # Get list of raw files:
     (raw_files, picture_files, gpx_file) = get_files(photo_folder)
 
     if len(raw_files) == 0:
-        log.info("INFO:\tAucun fichier brut trouve")
+        log.info("No raw file found.")
     else:
-        # Crée les repertoire 'BRUTS' si encore inexistant
+        # Create folder for "RAWS" if not existing already:
         if os.path.isdir(photo_folder + FOLDER_FOR_RAWS):
-            log.info("WARNING!\tLe dossier %r existe deja." % FOLDER_FOR_RAWS)
+            log.warning("\tFolder '%r' already exists" % FOLDER_FOR_RAWS)
         else:
-            log.info("Creation du dossier %r..." % FOLDER_FOR_RAWS)
+            log.info("\tCreating folder '%r'..." % FOLDER_FOR_RAWS)
             os.mkdir(photo_folder + FOLDER_FOR_RAWS)
 
-        # Deplacer les images *.CR2 vers BRUTS
-        log.info("Deplacement des fichiers bruts:")
-        for fichierBrut in raw_files:
-            log.info("\tDéplacement de %s..." % fichierBrut)
-            os.rename(photo_folder + fichierBrut, photo_folder + FOLDER_FOR_RAWS + "/" + fichierBrut)
+        log.info("Moving raw images to their folder...")
+        for raw_file in raw_files:
+            log.debug("\tMoving file '%s'..." % raw_file)
+            os.rename(photo_folder + raw_file, photo_folder + FOLDER_FOR_RAWS + "/" + raw_file)
 
 
 def geotag_move_backups(photo_folder):
@@ -236,11 +242,8 @@ def get_time_shift():
 
 
 def geotag_pictures(photo_folder):
-
     (fichiers_bruts, fichiers_images, file_gpx) = get_files(photo_folder)
-
-    log.info("                            _______________________")
-    log.info("===========================[ Géo-taggage des jpegs ]===========================")
+    log_title("geo-tagging jpegs pictures")
 
     if file_gpx == '':
         file_gpx_with_folder = get_newest_gpx_in_parent(photo_folder)
@@ -277,10 +280,10 @@ def geotag_pictures(photo_folder):
         else:
             log.warning(ERROR + "GPicSync -> return code = {0}".format(rc))
 
-        # D'après
+        # According to
         # http://stackoverflow.com/questions/3781851/run-a-python-script-from-another-python-script-passing-in-args
-        # il serait mieux d'utiliser de __main__ de gpicsync.py
-        # => Tentative ci-dessous, mais programation de GPicSync incertaine...
+        # it would be better to use the __main__ from gpicsync.py
+        # => Tentative below, but unsure about GPicSync implementation...
 
         # options_dir = photo_folder  # --directory
         # options_gpx = [file_gpx_with_folder]  # --gpx
@@ -317,29 +320,48 @@ def geotag_pictures(photo_folder):
     geotag_move_backups(photo_folder)
 
 
+def create_sub_folder_name(serie_of_photos, serie_is_hdr):
+    # create sub-folder name:
+    first_picture = serie_of_photos[0][:-4]  # le [:-4] permet de supprimer les 4 derniers car. (l'extension)
+    last_picture = serie_of_photos[len(serie_of_photos) - 1][:-4]
+    subfolder_name = first_picture + "-"  # Starts with the name of first picture
+    continue_loop = True
+    i = 0
+    while continue_loop:
+        if first_picture[i] == last_picture[i]:
+            # i-th char of each file is identical
+            i = i + 1
+        else:
+            # i-th char of each file is different => exiting the loop
+            continue_loop = False
+    subfolder_name = subfolder_name + last_picture[i:] + "_" + str(len(serie_of_photos))
+    if serie_is_hdr:
+        subfolder_name = subfolder_name + "_HDR"
+    return subfolder_name
+
+
 def group_pictures_by_time(photo_folder):
-    (fichiers_bruts, fichiers_images, file_gpx) = get_files(photo_folder)
+    (raw_files, rendered_files, file_gpx) = get_files(photo_folder)
 
-    log.info("                    _______________________________________")
-    log.info("===================[ Traitement des images jpegs restantes ]===================")
+    log_title("Manage remaining jpegs")
 
-    fichiers_images.sort()
+    rendered_files.sort()
     # os.stat_float_times(False)
     time_org_capture_began = list()
     time_org_capture_ended = list()
     time_from_previous_image = list()
     series_of_photos = list()
 
-    log.info("Nro  \tNro  \tNom de      \thorodatage\ttemps depuis")
-    log.info("Photo\tSerie\t     fichier\t          \tprecedente (s)")
-    for fichierImage in fichiers_images:
+    log.info("Pict.\tSerie\tFile name   \ttimestamp \ttime since")
+    log.info("Nr   \tNr   \t            \t          \tprevious")
+    for rendered_file in rendered_files:
         i = len(time_from_previous_image)
-        # time_org_capture_began.append(os.stat(photoFolder+fichierImage).st_mtime)
-        date_time_org_image = get_date_time_original_from_exif(photo_folder + fichierImage)
+        # time_org_capture_began.append(os.stat(photoFolder+rendered_file).st_mtime)
+        date_time_org_image = get_date_time_original_from_exif(photo_folder + rendered_file)
         time_org_capture_began.append(date_time_org_image)
 
         # FIXME Once get_exposure_time_from_exif() is fixed, uncomment and resolve below:
-        # time_org_capture_ended.append(date_time_org_image + get_exposure_time_from_exif(photo_folder + fichierImage))
+        # time_org_capture_ended.append(date_time_org_image + get_exposure_time_from_exif(photo_folder + rendered_file))
         time_org_capture_ended.append(date_time_org_image)
 
         if i == 0:
@@ -357,71 +379,56 @@ def group_pictures_by_time(photo_folder):
         if time_from_previous_image[i] > MIN_TIME_BETWEEN_PANOS:
             # Then we have a new set of picture:
             series_of_photos.append(list())
-            marque_separateur = "^^^^^^^^^^"
+            division_mark = "^^^^^^^^^^"
         else:
-            # Alors la photo courrante appartient a la meme serie que l'image precedente (panorama our HDR)
-            marque_separateur = "          "
-        series_of_photos[len(series_of_photos) - 1].append(fichierImage)
+            # else... current picture is part of the same serie as previous image (=> panorama or HDR)
+            division_mark = "          "
+        series_of_photos[len(series_of_photos) - 1].append(rendered_file)
         # log.info("%d\t%d\t%s\t%d\t%d\t%s" %
-        # (i, len(series_of_photos), fichierImage,
-        #  time_org_capture_began[i], time_from_previous_image[i], marque_separateur ))
+        # (i, len(series_of_photos), rendered_file,
+        #  time_org_capture_began[i], time_from_previous_image[i], division_mark ))
         log.info("%d\t%d\t%s\t%s\t%s\t%s" % (i,
                                              len(series_of_photos),
-                                             fichierImage,
+                                             rendered_file,
                                              time_org_capture_began[i],
                                              time_from_previous_image[i],
-                                             marque_separateur))
+                                             division_mark))
 
-    # log.info(series_of_photos)
     for serie_of_photos in series_of_photos:
         n_photo_in_serie = len(serie_of_photos)
         serie_is_hdr = False
         if n_photo_in_serie >= 3:
-            # Alors on a un groupe de photo (considere comme panorama)
-            log.info("Serie courrante: %d photos => panorama ou HDR" % n_photo_in_serie)
-            if n_photo_in_serie == 3:
-                # Traitement du cas d'un HDR: seules les 2 sur- et sous- exposees sont deplacees
-                log.info("Lecture du parametre EXIF 'ExposureTime' pour deduire si il s'agit d'un HDR...")
+            # Then we have a series of pictures (considered as a panorama)
+            log.info("Current set: %d pictures => panorama or HDR" % n_photo_in_serie)
+            if n_photo_in_serie == 3:  # ! We consider that HDR are only 3 set of pictures... should be improved later
+                # Exception case for HDR: only the 2 pictures over and under-exposed are moved. We keep the "middle" one
+                log.info("Reading EXIF parameter 'ExposureTime' to deduce if it is an HDR...")
                 exposure_time = list()
                 for i in range(0, n_photo_in_serie):
                     exposure_time.append(get_exposure_time_from_exif(photo_folder + serie_of_photos[i]))
                 if exposure_time[0] != exposure_time[1] \
                         and exposure_time[0] != exposure_time[2] \
                         and exposure_time[1] != exposure_time[2]:
-                    # Alors on a affaire a 3 expositions differentes, c'est donc un HDR
+                    # Then we have 3 different exposure values => HDR
                     serie_is_hdr = True
 
-            # Determination du nom du dossier:
-            first_picture = serie_of_photos[0][:-4]  # le [:-4] permet de supprimer les 4 derniers car. (l'extension)
-            last_picture = serie_of_photos[len(serie_of_photos) - 1][:-4]
-            subfolder_name = first_picture + "-"  # Commence par le nom de la premiere photo
-            continue_loop = True
-            i = 0
-            while continue_loop:
-                if first_picture[i] == last_picture[i]:
-                    # Le i eme caractere des 2 fichiers est identique
-                    i = i + 1
-                else:
-                    # Le i eme caractere des 2 fichiers n'est PAS identique => on quite la boucle
-                    continue_loop = False
-            subfolder_name = subfolder_name + last_picture[i:] + "_" + str(len(serie_of_photos))
-            if serie_is_hdr:
-                subfolder_name = subfolder_name + "_HDR"
+            subfolder_name = create_sub_folder_name(serie_of_photos, serie_is_hdr)
+
             if os.path.isdir(photo_folder + subfolder_name):
-                log.info("WARNING!\tLe dossier %r existe deja." % subfolder_name)
+                log.warning("Folder '%r' already exists" % subfolder_name)
             else:
-                log.info("Creation du sous-dossier %s..." % subfolder_name)
+                log.info("Creating sub-folder %s'..." % subfolder_name)
                 os.mkdir(photo_folder + subfolder_name)
 
-            log.info("Deplacement des photos dans %r..." % subfolder_name)
+            log.info("Moving pictures to '%r'..." % subfolder_name)
             is_first_file = True
-            for fichierImage in serie_of_photos:
+            for rendered_file in serie_of_photos:
                 if serie_is_hdr and is_first_file:
                     # If this is an HDR serie, the first file (normal exposure +0EV) is left in folder
-                    log.info("\tLe fichier %s de la serie HDR est laissé..." % fichierImage)
+                    log.info("\tFile '%s' from HDR set is left in main folder..." % rendered_file)
                 else:
-                    log.info("\tDeplacement de %s..." % fichierImage)
-                    os.rename(photo_folder + fichierImage, photo_folder + subfolder_name + "/" + fichierImage)
+                    log.info("\tMoving file '%s'..." % rendered_file)
+                    os.rename(photo_folder + rendered_file, photo_folder + subfolder_name + "/" + rendered_file)
                 is_first_file = False
 
             # The set of pictures is now in folder, ready to be computed
@@ -438,8 +445,8 @@ def group_pictures_by_time(photo_folder):
                     )
 
         else:
-            # Alors on a une serie de 1 ou 2 photo: on ignore et passe a la suite
-            log.info("Serie courrante: seulement %d photo(s) => serie ignoree" % n_photo_in_serie)
+            # we have a "serie" of 1 or 2 pictures: ignore and proceed with next pictures
+            log.info("Current set: only %d picture(s) => ignored" % n_photo_in_serie)
 
     log.info("Terminated.")
     log.info("")
@@ -461,7 +468,7 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     :param gpx_file:
     :return:
     """
-    # Normaliser photoFolder (ajout de '/' si non present a la fin):
+    # Normalise photoFolder (append with '/' if not already present at the end):
     if photo_folder[len(photo_folder) - 1] != '/':
         photo_folder = photo_folder + '/'
 
@@ -471,20 +478,20 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
 
     group_pictures_by_time(photo_folder)
 
-    # create_avif_for_raws(photo_folder)
+    # TODO create_avif_for_raws(photo_folder)
 
     return
 
 
 if __name__ == "__main__":
 
-    # A ETUDIER TODO : la commande:
+    # TODO Checks "panostart" command
     # panostart --output Makefile --projection 0 --fov 50 --nostacks --loquacious *.JPG
 
     argList = list(argv)
     nbArg = len(argList) - 1
     log.info("%d arguments reçus: %r" % (nbArg, argList))
-    # Test la validite des arguments:
+    # Tests arguments validity:
     if nbArg < 1 or nbArg > 2:
         log.critical(ERROR)
         log.critical("%s requires 1 or 2 arguments:" % argList[0])
@@ -495,15 +502,14 @@ if __name__ == "__main__":
         exit(RC_ATTRIBUTES_ERROR)
 
     # Repertoire à analyser:
-    photo_folder = argList[1]
+    photo_folder_arg = argList[1]
     if nbArg > 1:
-        gpx_file = argList[2]
+        gpx_file_arg = argList[2]
     else:
-        gpx_file = None
+        gpx_file_arg = None
 
-    if not os.path.isdir(photo_folder):
-        log.error("Le dossier passe en argument n'a pas ete reconnu comme valide:")
-        log.error("%r n'est pas un dossier valide." % photo_folder)
+    if not os.path.isdir(photo_folder_arg):
+        log.error("Folder '%r' given as argument is not detected as valid." % photo_folder_arg)
         exit(RC_PATH_ERROR)
 
-    sort_photos(photo_folder, gpx_file)
+    sort_photos(photo_folder_arg, gpx_file_arg)
