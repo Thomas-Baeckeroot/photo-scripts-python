@@ -34,6 +34,9 @@ ERROR = '\033[1;31mError:\033[0m '
 RC_ATTRIBUTES_ERROR = -1
 RC_PATH_ERROR = -2
 
+RAW_EXTENSIONS = {'.crw', '.cr2', '.cr3', '.nef'}
+RENDERED_EXTENSIONS = {'.jpg', '.jpeg', '.heif', '.avif'}
+
 # Folder to which backups of photos will be moved before applying geo-tagging
 # (relative to photoFolder, without final '/'):
 FOLDER_BACKUP_GPS = "BackupBeforeGPS!AE!"
@@ -50,24 +53,17 @@ logging.basicConfig(
 log = logging.getLogger("sort_photos.py")  # %(name)s
 
 config = configparser.ConfigParser()
-config.setdefaults({'Folders': {
-    'root': '~/Images',
-    'raw': 'RAW'
-}})
+# define default values:
+config['Folders'] = {}
+config['Folders']['root'] = '~/Images'
+config['Folders']['raw'] = 'RAW'
 
 config_path = os.path.expanduser('~/.config/sort_photo.conf')
 config.read(config_path)
 
 root_folder = os.path.expanduser(config['Folders']['root'])
 # Folder where raw files will be moved to (without final '/'):
-FOLDER_FOR_RAWS = os.path.join(root_folder, config['Folders']['raw'])
-
-
-# Example of config file sort_photo.conf with default values:
-#
-# [Folders]
-# root = ~/Images
-# raw = RAW
+FOLDER_FOR_RAWS = config['Folders']['raw']
 
 
 def log_title(title):
@@ -80,11 +76,11 @@ def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
     log.debug(list_of_files)
     if len(list_of_files) == 0:
-        log.warning("\nlatest_file: No GPX file found!")
+        log.warning("│ \nlatest_file: No GPX file found!")
         return None
     else:
         latest_file = max(list_of_files, key=os.path.getctime)
-        log.info("\nlatest_file: '" + str(latest_file) + "'")
+        log.info(f"│ \nlatest_file: '{latest_file}'")
         # type(latest_file)
         return str(latest_file)  # FIXME Should be "../abc.gpx"
 
@@ -98,13 +94,13 @@ def get_exif(file_name):
         # Have a try if .getexif() works better:
         info = i.getexif()
         if info:
-            log.warning(f"Method .getexif() worked while ._getexit() failed for file '{file_name}'")
+            log.warning(f"│ Method .getexif() worked while ._getexit() failed for file '{file_name}'")
     if info:
         for tag, value in info.items():
             decoded = TAGS.get(tag, tag)
             ret[decoded] = value
     else:
-        log.warning(f"Unable to get exif information from file '{file_name}' (returning empty dictionary).")
+        log.warning(f"│ Unable to get exif information from file '{file_name}' (returning empty dictionary).")
     return ret
 
 
@@ -125,13 +121,13 @@ def get_exposure_time_from_exif(file_name):
     # ret = timedelta(seconds=exp_time_vect[0] / float(exp_time_vect[1]))  # returns a timedelta
     # return ret
 
-    log.info("ssv._numerator / ssv._denominator / ssv._val:")
+    log.info("│ ssv._numerator / ssv._denominator / ssv._val:")
     try:
         log.info(ssv._numerator)
         log.info(ssv._denominator)
         log.info(ssv._val)
     except AttributeError:
-        log.info("AttributeError! (ignored and proceeding...)")
+        log.info("│ AttributeError! (ignored and proceeding...)")
     return 1
 
 
@@ -151,8 +147,8 @@ def get_date_time_original_from_exif(file_name):
     try:
         dt_original_unicode = exif_of_file_name['DateTimeOriginal']
     except KeyError:
-        log.error(f"KeyError occurred when trying to find exif parameter 'DateTimeOriginal' "
-                  f"from file '{file_name}' (returning None as datetime).")
+        log.error(f"│ KeyError occurred when trying to find exif parameter 'DateTimeOriginal' "
+                  f"│ from file '{file_name}' (returning None as datetime).")
         return None
     # log.info("get_date_time_original_from_exif(%r)" % fileName)
     # log.info("    dt_original_unicode = %r" % dt_original_unicode)
@@ -169,64 +165,79 @@ def get_files(photo_folder):
 
     # Create list of RAW files:
     raw_files = list()
-    picture_files = list()
+    rendered_files = list()
+    other_files = list()
     gpx_file = ''
     for file_name in folder_content:
         file_ext = file_name[-4:].lower()
-        if file_ext in {'.crw', '.cr2', '.cr3', '.nef'}:
+        if file_ext in RAW_EXTENSIONS:
             raw_files.append(file_name)
-        elif file_ext in {'.jpg', '.jpeg', '.heif', '.avif'}:
-            picture_files.append(file_name)
-        elif file_ext == '.gpx':
-            gpx_file = file_name
+        elif file_ext in RENDERED_EXTENSIONS:
+            rendered_files.append(file_name)
         else:
-            log.warning(f"Unable to determine type of file '{file_name}' (file will be ignored).")
-            pass
-    return raw_files, picture_files, gpx_file
+            log.warning(f"│ Unable to determine type of file '{file_name}'.")
+            other_files.append(file_name)
+
+    return raw_files, rendered_files, other_files
 
 
-def move_raws(photo_folder):
+def create_avif_for_raw(raw_file):
+    log.info(f"│\t ↳ Create avif from file '{raw_file}' - TO BE IMPLEMENTED!!!")
+    # FIXME Implement method avif
+    return
+
+
+def move_raws(photo_folder, raw_files, rendered_files, other_files):
     log_title("Search for raw files for moving to adequate folder")
 
-    # Get list of raw files:
-    (raw_files, picture_files, gpx_file) = get_files(photo_folder)
-
     if len(raw_files) == 0:
-        log.info("No raw file found.")
+        log.info("│ No raw file found.")
     else:
         # Create folder for "RAWS" if not existing already:
         if os.path.isdir(photo_folder + FOLDER_FOR_RAWS):
-            log.warning("\tFolder '%r' already exists" % FOLDER_FOR_RAWS)
+            log.warning("│\tFolder '%r' already exists" % FOLDER_FOR_RAWS)
         else:
-            log.info("\tCreating folder '%r'..." % FOLDER_FOR_RAWS)
+            log.info("│\tCreating folder '%r'..." % FOLDER_FOR_RAWS)
             os.mkdir(photo_folder + FOLDER_FOR_RAWS)
 
-        log.info("Moving raw images to their folder...")
+        log.info("│ Moving raw images to their folder...")
         for raw_file in raw_files:
-            log.debug("\tMoving file '%s'..." % raw_file)
+            log.debug("│\tMoving file '%s'..." % raw_file)
             os.rename(photo_folder + raw_file, photo_folder + FOLDER_FOR_RAWS + "/" + raw_file)
+            # check if any file associated with raw exists (like processing profiles .pp3 or others):
+            for other_file in other_files:
+                if other_file.startswith(raw_file):
+                    os.rename(photo_folder + other_file, photo_folder + FOLDER_FOR_RAWS + "/" + other_file)
+            basename = os.path.splitext(raw_file)[0]
+            found_rendered_file = False
+            for rendered_file in rendered_files:
+                if rendered_file.startswith(basename):
+                    found_rendered_file = True
+                    log.debug("FOUND RENDERED FILE")
+                    pass
+            if not found_rendered_file:
+                create_avif_for_raw(raw_file)
 
 
 def geotag_move_backups(photo_folder):
     # sleep(5)  # Wait a bit for files to be effectively written (if not waiting, files *_original are not moved)
     # Si des sauvegardes (backup) des photos ont été crées, on les déplace vers un nouveau dossier
     backup_files = glob.glob(photo_folder + '*_original')  # get backup files within the directory
-    log.info("Found Backup files by geo-tag: {0}".format(backup_files))
+    log.info(f"│ Found Backup files by geo-tag: {backup_files}")
     while len(backup_files) > 0:
-        log.info("Backup files by geo-tag: {0}".format(backup_files))
+        log.info(f"│ Backup files by geo-tag: {backup_files}")
         # Create 'Backups' folder is not existing yet:
         if os.path.isdir(photo_folder + FOLDER_BACKUP_GPS):
-            log.info("Folder '%r' for backup pictures already exists." % FOLDER_BACKUP_GPS)
+            log.info(f"│ Folder '{FOLDER_BACKUP_GPS}' for backup pictures already exists.")
         else:
-            log.info("Create folder '%r' for backup pictures..." % FOLDER_BACKUP_GPS)
+            log.info(f"│ Create folder '{FOLDER_BACKUP_GPS}' for backup pictures...")
             os.mkdir(photo_folder + FOLDER_BACKUP_GPS)
 
-        # Deplacer les images *_backup* vers le dossier des sauvegardes
-        log.info("Déplacement des fichiers originaux (avant géo-taggage):")
-        for fichierBackup in backup_files:
-            log.info("\tDeplacement de %s..." % fichierBackup)
+        log.info("│ Moving original files (before modifying with geo-tag):")
+        for backup_file in backup_files:
+            log.info(f"│ \tMoving '{backup_file}'...")
             # try:
-            os.rename(fichierBackup, fichierBackup.replace(photo_folder, photo_folder + FOLDER_BACKUP_GPS + "/"))
+            os.rename(backup_file, backup_file.replace(photo_folder, photo_folder + FOLDER_BACKUP_GPS + "/"))
         # Due to some files being missed sometime, we're getting again list of original files that may have been missed
         # in first call (just over 'while'):
         backup_files = glob.glob(photo_folder + '*_original')  # get backup files within the directory
@@ -241,14 +252,14 @@ def get_time_shift():
     return input('Please inform time offset (timezone) as "+n" ("+1" will be used as default): ') or "+1"
 
 
-def geotag_pictures(photo_folder):
-    (fichiers_bruts, fichiers_images, file_gpx) = get_files(photo_folder)
+def geotag_pictures(photo_folder, file_gpx):
     log_title("geo-tagging jpegs pictures")
 
     if file_gpx == '':
         file_gpx_with_folder = get_newest_gpx_in_parent(photo_folder)
+        # Should check the list other_files that may contain a gpx file
     else:
-        file_gpx_with_folder = photo_folder + file_gpx
+        file_gpx_with_folder = file_gpx
 
     if file_gpx_with_folder:  # variable defined (not None)
 
@@ -261,7 +272,7 @@ def geotag_pictures(photo_folder):
         # subprocess.call(
         #     gpysync_cmd,
         #     shell=True)
-        log.info("Launching GPicSync...")
+        log.info("│ Launching GPicSync...")
         child = subprocess.Popen(
             ["python", "/home/thomas/Applications/GPicSync/src/gpicsync.py",
              "--directory=" + photo_folder,
@@ -271,14 +282,14 @@ def geotag_pictures(photo_folder):
             # , stdout=subprocess.PIPE
         )
         streamdata = child.communicate()[0]  # Unused value but required to wait for end of process ?
-        log.debug("Waiting for Return Code from GPicSync...")
+        log.debug("│ Waiting for Return Code from GPicSync...")
         rc = child.returncode
         # log.debug("GPicSync stdout:")  # .format(str(streamdata)))
         # print(streamdata)
         if rc == 0:
-            log.info("GPicSync -> return code = {0}".format(rc))
+            log.info(f"│ GPicSync -> return code = {rc}")
         else:
-            log.warning(ERROR + "GPicSync -> return code = {0}".format(rc))
+            log.warning(f"│ {ERROR}GPicSync -> return code = {rc}")
 
         # According to
         # http://stackoverflow.com/questions/3781851/run-a-python-script-from-another-python-script-passing-in-args
@@ -315,14 +326,14 @@ def geotag_pictures(photo_folder):
         #     geo.syncPicture(filePath)[0]
 
     else:  # from "if file_gpx_with_folder" => file_gpx_with_folder is None
-        log.info("No GPX file usable => GPicSync not launched.")
+        log.info("│ No GPX file usable => GPicSync not launched.")
 
     geotag_move_backups(photo_folder)
 
 
 def create_sub_folder_name(serie_of_photos, serie_is_hdr):
     # create sub-folder name:
-    first_picture = serie_of_photos[0][:-4]  # le [:-4] permet de supprimer les 4 derniers car. (l'extension)
+    first_picture = serie_of_photos[0][:-4]  # the [:-4] removes the 4 lasts chars (extension)
     last_picture = serie_of_photos[len(serie_of_photos) - 1][:-4]
     subfolder_name = first_picture + "-"  # Starts with the name of first picture
     continue_loop = True
@@ -340,8 +351,7 @@ def create_sub_folder_name(serie_of_photos, serie_is_hdr):
     return subfolder_name
 
 
-def group_pictures_by_time(photo_folder):
-    (raw_files, rendered_files, file_gpx) = get_files(photo_folder)
+def group_pictures_by_time(photo_folder, rendered_files):
 
     log_title("Manage remaining jpegs")
 
@@ -352,8 +362,8 @@ def group_pictures_by_time(photo_folder):
     time_from_previous_image = list()
     series_of_photos = list()
 
-    log.info("Pict.\tSerie\tFile name   \ttimestamp \ttime since")
-    log.info("Nr   \tNr   \t            \t          \tprevious")
+    log.info("│ Pict.\tSerie\tFile name   \ttimestamp \ttime since")
+    log.info("│ Nr   \tNr   \t            \t          \tprevious")
     for rendered_file in rendered_files:
         i = len(time_from_previous_image)
         # time_org_capture_began.append(os.stat(photoFolder+rendered_file).st_mtime)
@@ -387,22 +397,22 @@ def group_pictures_by_time(photo_folder):
         # log.info("%d\t%d\t%s\t%d\t%d\t%s" %
         # (i, len(series_of_photos), rendered_file,
         #  time_org_capture_began[i], time_from_previous_image[i], division_mark ))
-        log.info("%d\t%d\t%s\t%s\t%s\t%s" % (i,
-                                             len(series_of_photos),
-                                             rendered_file,
-                                             time_org_capture_began[i],
-                                             time_from_previous_image[i],
-                                             division_mark))
+        log.info("│ %d\t%d\t%s\t%s\t%s\t%s" % (i,
+                                               len(series_of_photos),
+                                               rendered_file,
+                                               time_org_capture_began[i],
+                                               time_from_previous_image[i],
+                                               division_mark))
 
     for serie_of_photos in series_of_photos:
         n_photo_in_serie = len(serie_of_photos)
         serie_is_hdr = False
         if n_photo_in_serie >= 3:
             # Then we have a series of pictures (considered as a panorama)
-            log.info("Current set: %d pictures => panorama or HDR" % n_photo_in_serie)
+            log.info("│ Current set: %d pictures => panorama or HDR" % n_photo_in_serie)
             if n_photo_in_serie == 3:  # ! We consider that HDR are only 3 set of pictures... should be improved later
                 # Exception case for HDR: only the 2 pictures over and under-exposed are moved. We keep the "middle" one
-                log.info("Reading EXIF parameter 'ExposureTime' to deduce if it is an HDR...")
+                log.info("│ Reading EXIF parameter 'ExposureTime' to deduce if it is an HDR...")
                 exposure_time = list()
                 for i in range(0, n_photo_in_serie):
                     exposure_time.append(get_exposure_time_from_exif(photo_folder + serie_of_photos[i]))
@@ -415,19 +425,19 @@ def group_pictures_by_time(photo_folder):
             subfolder_name = create_sub_folder_name(serie_of_photos, serie_is_hdr)
 
             if os.path.isdir(photo_folder + subfolder_name):
-                log.warning("Folder '%r' already exists" % subfolder_name)
+                log.warning(f"│ Folder '{subfolder_name}' already exists")
             else:
-                log.info("Creating sub-folder %s'..." % subfolder_name)
+                log.info(f"│ Creating sub-folder '{subfolder_name}'...")
                 os.mkdir(photo_folder + subfolder_name)
 
-            log.info("Moving pictures to '%r'..." % subfolder_name)
+            log.info(f"│ Moving pictures to '{subfolder_name}'...")
             is_first_file = True
             for rendered_file in serie_of_photos:
                 if serie_is_hdr and is_first_file:
                     # If this is an HDR serie, the first file (normal exposure +0EV) is left in folder
-                    log.info("\tFile '%s' from HDR set is left in main folder..." % rendered_file)
+                    log.info(f"│ \tFile '{rendered_file}' from HDR set is left in main folder...")
                 else:
-                    log.info("\tMoving file '%s'..." % rendered_file)
+                    log.info(f"│ \tMoving file '{rendered_file}'...")
                     os.rename(photo_folder + rendered_file, photo_folder + subfolder_name + "/" + rendered_file)
                 is_first_file = False
 
@@ -446,12 +456,12 @@ def group_pictures_by_time(photo_folder):
 
         else:
             # we have a "serie" of 1 or 2 pictures: ignore and proceed with next pictures
-            log.info("Current set: only %d picture(s) => ignored" % n_photo_in_serie)
+            log.info(f"│ Current set: only {n_photo_in_serie} picture(s) => ignored")
 
-    log.info("Terminated.")
-    log.info("")
-    log.info("Panorama may have been added in:")
-    log.info("cat /home/thomas/Images/2017\\ PegASUS\\ seul/create_panos_script.sh")
+    log.info("│ Terminated.")
+    log.info("│ ")
+    log.info("│ Panorama may have been added in:")
+    log.info("│ cat /home/thomas/Images/2017\\ PegASUS\\ seul/create_panos_script.sh")
 
 
 def create_avif_for_raws(photo_folder):
@@ -462,21 +472,24 @@ def create_avif_for_raws(photo_folder):
 
 def sort_photos(photo_folder: str, gpx_file: str) -> None:
     """
+    Organise pictures in folder.
 
-
-    :param photo_folder:
-    :param gpx_file:
-    :return:
+    :param photo_folder: Photo folder to be sorted
+    :param gpx_file: GPS tracker file to geo-localize picture (if not already)
+    :return: exit code 0 if no errors
     """
     # Normalise photoFolder (append with '/' if not already present at the end):
     if photo_folder[len(photo_folder) - 1] != '/':
         photo_folder = photo_folder + '/'
 
-    move_raws(photo_folder)
+    (raw_files, rendered_files, other_files) = get_files(photo_folder)
 
-    geotag_pictures(photo_folder)
+    move_raws(photo_folder, raw_files, rendered_files, other_files)
 
-    group_pictures_by_time(photo_folder)
+    # if no gpx_file defined, pick a gpx file from other_files if any...
+    geotag_pictures(photo_folder, gpx_file)
+
+    group_pictures_by_time(photo_folder, rendered_files)
 
     # TODO create_avif_for_raws(photo_folder)
 
@@ -490,12 +503,12 @@ if __name__ == "__main__":
 
     argList = list(argv)
     nbArg = len(argList) - 1
-    log.info("%d arguments reçus: %r" % (nbArg, argList))
+    log.info(f"{nbArg} arguments reçus: {argList}")
     # Tests arguments validity:
     if nbArg < 1 or nbArg > 2:
         log.critical(ERROR)
-        log.critical("%s requires 1 or 2 arguments:" % argList[0])
-        log.critical("%s pictures_path [gpx_path]" % argList[0])
+        log.critical(f"{argList[0]} requires 1 or 2 arguments:")
+        log.critical(f"{argList[0]} pictures_path [gpx_path]")
         log.critical("Where:")
         log.critical("- pictures_path is the path where the pictures to sort are")
         log.critical("- gpx_path is the path of the gpx track file (optional)")
@@ -509,7 +522,7 @@ if __name__ == "__main__":
         gpx_file_arg = None
 
     if not os.path.isdir(photo_folder_arg):
-        log.error("Folder '%r' given as argument is not detected as valid." % photo_folder_arg)
+        log.error(f"Folder '{photo_folder_arg}' given as argument is not detected as valid.")
         exit(RC_PATH_ERROR)
 
     sort_photos(photo_folder_arg, gpx_file_arg)
