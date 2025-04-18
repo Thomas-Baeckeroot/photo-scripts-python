@@ -181,9 +181,26 @@ def get_files(photo_folder):
     return raw_files, rendered_files, other_files
 
 
-def create_avif_for_raw(raw_file):
-    log.info(f"│\t ↳ Create avif from file '{raw_file}' - TO BE IMPLEMENTED!!!")
-    # FIXME Implement method avif
+def create_avif_for_raw(photo_folder, raw_file):
+    log.info(f"│\t  ↳ Create avif from file '{raw_file}'")
+    # FIXME Work in progress: method to be implemented yet!
+    src_image_fullpath = photo_folder + FOLDER_FOR_RAWS + "/" + raw_file
+    log.debug(f"│\t    opening file '{src_image_fullpath}'...")
+    split_filename = os.path.splitext(raw_file)
+    basename = split_filename[0]
+    extension: str = split_filename[1]
+    #if extension.lower() in {"exif"}:
+    #    # Pillow accepted formats: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
+    if extension.lower() == "cr3":
+        image_cr3 = None  # TODO Implementation on hold...
+    # Below command allowed to create a jpg:
+    # python parse_cr3.py /media/thomas/deimos.photo/2025/2025-02-02\ Sun\ -\ Panorama\ St\ Benoit\ et\ étang\ Laurent/IMG_8441.CR3 -v 1 -x
+    image = Image.open(src_image_fullpath)
+    # In order to get cr3 info., see https://github.com/lclevy/canon_cr3
+    basename = os.path.splitext(raw_file)[0]
+    image.save(photo_folder + basename + ".jpg")
+    image.save(photo_folder + basename + ".avif")
+    image.save(photo_folder + basename + ".tif")
     return
 
 
@@ -195,18 +212,19 @@ def move_raws(photo_folder, raw_files, rendered_files, other_files):
     else:
         # Create folder for "RAWS" if not existing already:
         if os.path.isdir(photo_folder + FOLDER_FOR_RAWS):
-            log.warning("│\tFolder '%r' already exists" % FOLDER_FOR_RAWS)
+            log.warning(f"│ Folder '{FOLDER_FOR_RAWS}' already exists")
         else:
-            log.info("│\tCreating folder '%r'..." % FOLDER_FOR_RAWS)
+            log.info(f"│ Creating folder '{FOLDER_FOR_RAWS}'...")
             os.mkdir(photo_folder + FOLDER_FOR_RAWS)
 
         log.info("│ Moving raw images to their folder...")
         for raw_file in raw_files:
-            log.debug("│\tMoving file '%s'..." % raw_file)
+            log.debug(f"│\tMoving file '{raw_file}'...")
             os.rename(photo_folder + raw_file, photo_folder + FOLDER_FOR_RAWS + "/" + raw_file)
             # check if any file associated with raw exists (like processing profiles .pp3 or others):
             for other_file in other_files:
                 if other_file.startswith(raw_file):
+                    log.debug(f"│\t(and associate file '{other_file}'...)")
                     os.rename(photo_folder + other_file, photo_folder + FOLDER_FOR_RAWS + "/" + other_file)
             basename = os.path.splitext(raw_file)[0]
             found_rendered_file = False
@@ -216,7 +234,7 @@ def move_raws(photo_folder, raw_files, rendered_files, other_files):
                     log.debug("FOUND RENDERED FILE")
                     pass
             if not found_rendered_file:
-                create_avif_for_raw(raw_file)
+                create_avif_for_raw(photo_folder, raw_file)
 
 
 def geotag_move_backups(photo_folder):
