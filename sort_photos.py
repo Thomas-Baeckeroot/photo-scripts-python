@@ -134,6 +134,75 @@ def scan_directory(root_directory):
     return files
 
 
+def extract_image_metadata(files):
+    """
+    Extracts metadata (timestamp, exposure time, GPS info) from image files
+    and updates ImageFile objects using named EXIF tags.
+
+    Args:
+        files (list[ImageFile]): List of ImageFile objects to process
+
+    Returns:
+        list[ImageFile]: Updated list of ImageFile objects with extracted metadata
+    """
+    # Define EXIF tag constants
+    EXIF_DATETIME_ORIGINAL = 'DateTimeOriginal'
+    EXIF_DATETIME = 'DateTime'
+    EXIF_EXPOSURE_TIME = 'ExposureTime'
+    EXIF_GPS_INFO = 'GPSInfo'
+
+    for file in files:
+        # Only process files that are images (RAW or processed)
+        if file.raw_extension or file.processed_extension:
+            full_path = os.path.join(
+                root_folder,
+                file.relative_path.lstrip('/'),
+                file.original_filename
+            )
+
+            try:
+                # Try to open the image file
+                with Image.open(full_path) as img:
+                    # Extract EXIF data
+                    exif_data = img._getexif()
+
+                    if exif_data:
+                        # Convert numeric tags to named tags
+                        exif = {TAGS.get(tag_id, tag_id): value for tag_id, value in exif_data.items()}
+
+                        # Extract timestamp
+                        if EXIF_DATETIME_ORIGINAL in exif:
+                            date_str = exif[EXIF_DATETIME_ORIGINAL]
+                            try:
+                                file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                            except ValueError:
+                                log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
+                        elif EXIF_DATETIME in exif:
+                            date_str = exif[EXIF_DATETIME]
+                            try:
+                                file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                            except ValueError:
+                                log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
+
+                        # Extract exposure time
+                        if EXIF_EXPOSURE_TIME in exif:
+                            exposure = exif[EXIF_EXPOSURE_TIME]
+                            # EXIF stores exposure as a fraction (tuple of numerator, denominator)
+                            if isinstance(exposure, tuple) and len(exposure) == 2:
+                                file.exposure_time = exposure[0] / exposure[1]
+                            else:
+                                file.exposure_time = float(exposure)
+
+                        # Check if GPS data exists
+                        file.has_gps = EXIF_GPS_INFO in exif and exif[EXIF_GPS_INFO]
+
+            except (IOError, AttributeError, KeyError) as e:
+                log.warning(f"Could not process EXIF data for {file.original_filename}: {str(e)}")
+        log.debug(f"File '{file.original_filename}': timestamp={file.timestamp}; exposure={file.exposure_time}; has GPS info = {file.has_gps}")
+
+    return files
+
+
 def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
     log.debug(list_of_files)
@@ -565,6 +634,9 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     files = scan_directory(photo_folder)
     log.info(f"Found {len(files)} files in {photo_folder}")
     log.debug(f"Files: {files}")
+
+    # Extract metadata from images:
+    files = extract_image_metadata(files)
 
     (raw_files, rendered_files, other_files) = get_files(photo_folder)
 
