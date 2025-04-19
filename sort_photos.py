@@ -20,10 +20,12 @@ import logging
 import os
 import subprocess
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from PIL import Image  # If PIL module not installed, then: `pip install Pillow`, soon pillow-avif-plugin will also be required
 from PIL.ExifTags import TAGS
 from sys import argv
+from typing import Optional
 
 # CONSTANTS:
 ERROR = '\033[1;31mError:\033[0m '
@@ -64,6 +66,20 @@ config.read(config_path)
 root_folder = os.path.expanduser(config['Folders']['root'])
 # Folder where raw files will be moved to (without final '/'):
 FOLDER_FOR_RAWS = config['Folders']['raw']
+
+
+@dataclass(order=True)
+class ImageFile:
+    basename: str
+    original_filename: str
+    relative_path: str
+    raw_extension: Optional[str] = None
+    processed_extension: Optional[str] = None
+    timestamp: Optional[datetime] = None
+    exposure_time: Optional[float] = None
+    has_gps: bool = False
+    group_id: Optional[str] = None  # Identifiant du groupe (panorama, HDR, etc.)
+    group_type: Optional[str] = None  # Type de groupe: "panorama", "hdr", "focus"
 
 
 def log_title(title):
