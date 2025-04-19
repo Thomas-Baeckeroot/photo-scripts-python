@@ -275,6 +275,151 @@ def consolidate_images(files):
     return result
 
 
+def identify_image_groups(files):
+    """
+    Identifies groups of images that form series like panoramas, HDR, or focus bracketing.
+    Groups are identified based on timestamp proximity and shooting parameters.
+
+    Args:
+        files (list[ImageFile]): List of ImageFile objects to analyze
+
+    Returns:
+        list[ImageFile]: Updated list with group information
+    """
+    # Sort files by timestamp first
+    sorted_files = sorted([f for f in files if f.timestamp], key=lambda x: x.timestamp)
+
+    if not sorted_files:
+        log.warning("No files with timestamps available for grouping")
+        return files
+
+    log.info(f"Analyzing {len(sorted_files)} files with timestamps for series identification")
+
+    current_group = None
+    current_group_type = None
+    current_group_id = 0
+    last_timestamp = None
+
+    # Parameters for group identification
+    MAX_TIME_PANORAMA = MIN_TIME_BETWEEN_PANOS  # Use constant from your code
+    MAX_TIME_HDR = 3  # Maximum seconds between HDR shots
+    MAX_TIME_FOCUS = 5  # Maximum seconds between focus bracketing shots
+
+    for file in sorted_files:
+        # Skip if no timestamp
+        if not file.timestamp:
+            continue
+
+        if last_timestamp is None:
+            # First file with timestamp
+            last_timestamp = file.timestamp
+            continue
+
+        # Calculate time difference from previous shot
+        time_diff = (file.timestamp - last_timestamp).total_seconds()
+
+        # Determine if this is part of a series
+        if time_diff <= MAX_TIME_HDR:
+            # Very close shots are likely HDR or exposure bracketing
+            if current_group_type != "hdr" or time_diff > MAX_TIME_HDR:
+                # Start new HDR group
+                current_group_id += 1
+                current_group_type = "hdr"
+
+            file.group_id = f"hdr_{current_group_id}"
+            file.group_type = "hdr"
+            log.debug(f"Added {file.basename} to HDR group {current_group_id}")
+
+        elif time_diff <= MAX_TIME_FOCUS:
+            # Close shots might be focus bracketing
+            if current_group_type != "focus" or time_diff > MAX_TIME_FOCUS:
+                # Start new focus bracketing group
+                current_group_id += 1
+                current_group_type = "focus"
+
+            file.group_id = f"focus_{current_group_id}"
+            file.group_type = "focus"
+            log.debug(f"Added {file.basename} to focus bracketing group {current_group_id}")
+
+        elif time_diff <= MAX_TIME_PANORAMA:
+            # Shots within panorama time range
+            if current_group_type != "panorama" or time_diff > MAX_TIME_PANORAMA:
+                # Start new panorama group
+                current_group_id += 1
+                current_group_type = "panorama"
+
+            file.group_id = f"panorama_{current_group_id}"
+            file.group_type = "panorama"
+            log.debug(f"Added {file.basename} to panorama group {current_group_id}")
+
+        else:
+            # This shot doesn't belong to a series
+            current_group_type = None
+
+        # Update last timestamp
+        last_timestamp = file.timestamp
+
+    # Count groups
+    panorama_groups = len(set(f.group_id for f in files if f.group_type == "panorama"))
+    hdr_groups = len(set(f.group_id for f in files if f.group_type == "hdr"))
+    focus_groups = len(set(f.group_id for f in files if f.group_type == "focus"))
+
+    log.info(f"Identified {panorama_groups} panorama groups, {hdr_groups} HDR groups, and {focus_groups} focus bracketing groups")
+
+    return files
+
+
+def identify_advanced_image_groups(files):
+    """
+    Advanced identification of image groups with additional metadata criteria.
+
+    Args:
+        files (list[ImageFile]): List of ImageFile objects to analyze
+
+    Returns:
+        list[ImageFile]: Updated list with group information
+    """
+    # Basic grouping by time first
+    files = identify_image_groups(files)
+
+    # Additional refinement could be done here
+    # For example, checking exposure_time patterns for HDR
+    # or checking GPS coordinates for panoramas
+
+    # Identify HDR groups by checking exposure variation
+    potential_hdr_groups = {}
+    for file in files:
+        if file.group_type == "hdr" and file.exposure_time:
+            if file.group_id not in potential_hdr_groups:
+                potential_hdr_groups[file.group_id] = []
+            potential_hdr_groups[file.group_id].append(file)
+
+    # Verify HDR groups by checking exposure variation
+    for group_id, group_files in potential_hdr_groups.items():
+        if len(group_files) < 2:
+            continue
+
+        exposures = [f.exposure_time for f in group_files if f.exposure_time]
+        if not exposures or len(exposures) < 2:
+            continue
+
+        # Check if there's significant exposure variation
+        min_exp = min(exposures)
+        max_exp = max(exposures)
+
+        # If max exposure is at least 2x min exposure, it's likely HDR
+        if max_exp / min_exp >= 2:
+            log.info(f"Confirmed HDR group {group_id} with exposure range: {min_exp}s to {max_exp}s")
+        else:
+            # Not enough exposure variation, might be something else
+            for f in group_files:
+                if f.group_type == "hdr":
+                    f.group_type = "burst"  # Reclassify as generic burst
+                    log.debug(f"Reclassified {f.basename} from HDR to burst (insufficient exposure variation)")
+
+    return files
+
+
 def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
     log.debug(list_of_files)
@@ -713,6 +858,10 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     # Consolidate files with the same basename:
     files = consolidate_images(files)
 
+    # Identify image groups
+    files = identify_advanced_image_groups(files)
+
+    # Older method being deprecated:
     (raw_files, rendered_files, other_files) = get_files(photo_folder)
 
     move_raws(photo_folder, raw_files, rendered_files, other_files)
