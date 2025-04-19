@@ -203,6 +203,78 @@ def extract_image_metadata(files):
     return files
 
 
+def consolidate_images(files):
+    """
+    Consolidates ImageFile objects with the same basename.
+    Merges information from RAW and processed versions of the same image.
+    Warns about discrepancies in metadata between files with the same basename.
+
+    Args:
+        files (list[ImageFile]): List of ImageFile objects to consolidate
+
+    Returns:
+        list[ImageFile]: Consolidated list of ImageFile objects
+    """
+    # Dictionary to store consolidated files, keyed by basename
+    consolidated = {}
+
+    log.info(f"Starting consolidation of {len(files)} files...")
+
+    for file in files:
+        if file.basename in consolidated:
+            # File with this basename already exists, consolidate information
+            existing = consolidated[file.basename]
+
+            # Check for RAW extension
+            if file.raw_extension and not existing.raw_extension:
+                existing.raw_extension = file.raw_extension
+            elif file.raw_extension and existing.raw_extension and file.raw_extension != existing.raw_extension:
+                log.warning(f"Multiple RAW formats for {file.basename}: {existing.raw_extension} and {file.raw_extension}")
+
+            # Check for processed extension
+            if file.processed_extension and not existing.processed_extension:
+                existing.processed_extension = file.processed_extension
+            elif file.processed_extension and existing.processed_extension and file.processed_extension != existing.processed_extension:
+                log.warning(f"Multiple processed formats for {file.basename}: {existing.processed_extension} and {file.processed_extension}")
+
+            # Check timestamps
+            if file.timestamp and not existing.timestamp:
+                existing.timestamp = file.timestamp
+            elif file.timestamp and existing.timestamp:
+                # Allow for small discrepancies in timestamps (up to 2 seconds)
+                if abs((file.timestamp - existing.timestamp).total_seconds()) > 2:
+                    log.error(f"Timestamp mismatch for {file.basename}: {existing.timestamp} vs {file.timestamp}")
+                # Take the earlier timestamp to be safe
+                existing.timestamp = min(existing.timestamp, file.timestamp)
+
+            # Check exposure time
+            if file.exposure_time and not existing.exposure_time:
+                existing.exposure_time = file.exposure_time
+            elif file.exposure_time and existing.exposure_time and abs(file.exposure_time - existing.exposure_time) > 0.001:
+                log.warning(f"Exposure time mismatch for {file.basename}: {existing.exposure_time}s vs {file.exposure_time}s")
+
+            # Set has_gps to True if either file has GPS data
+            existing.has_gps = existing.has_gps or file.has_gps
+
+            # Different relative paths might indicate file is in multiple locations
+            if file.relative_path != existing.relative_path:
+                log.warning(f"File {file.basename} exists in multiple locations: {existing.relative_path} and {file.relative_path}")
+
+        else:
+            # First time seeing this basename, add to consolidated dictionary
+            consolidated[file.basename] = file
+
+    # Convert dictionary values back to a list
+    result = list(consolidated.values())
+
+    log.info(f"Consolidation complete: {len(files)} files consolidated into {len(result)} unique images")
+
+    # Sort by basename (since order=True is defined in the dataclass)
+    result.sort()
+
+    return result
+
+
 def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
     log.debug(list_of_files)
@@ -637,6 +709,9 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
 
     # Extract metadata from images:
     files = extract_image_metadata(files)
+
+    # Consolidate files with the same basename:
+    files = consolidate_images(files)
 
     (raw_files, rendered_files, other_files) = get_files(photo_folder)
 
