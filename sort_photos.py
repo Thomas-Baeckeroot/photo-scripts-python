@@ -88,6 +88,52 @@ def log_title(title):
     log.info("│" + " " * 19 + "└" + "─" * (2 + len(title)) + "┘" + " " * 19 + "│")
 
 
+def scan_directory(root_directory):
+    """
+    Recursively scans a directory and its subdirectories to create ImageFile instances for all files.
+
+    Args:
+        root_directory (str): Path to the root directory to scan
+
+    Returns:
+        list[ImageFile]: List of all files found
+    """
+    files = []
+    root_directory = os.path.abspath(root_directory)
+
+    # Walk through all files and subdirectories
+    for dirpath, _, filenames in os.walk(root_directory):
+        for filename in filenames:
+            # Extract basename (name without extension) and extension
+            basename, ext = os.path.splitext(filename)
+
+            # Calculate relative path from root directory
+            rel_path = os.path.relpath(dirpath, root_directory)
+            if rel_path == ".":  # If it's the root directory
+                rel_path = ""
+            rel_path = "/" + rel_path if rel_path else "/"
+
+            # Determine if it's a RAW or processed image
+            raw_ext = ext if ext.lower() in RAW_EXTENSIONS else None
+            processed_ext = ext if ext.lower() in RENDERED_EXTENSIONS else None
+
+            # Create and add the ImageFile instance
+            file_obj = ImageFile(
+                basename=basename,
+                original_filename=filename,
+                relative_path=rel_path,
+                raw_extension=raw_ext,
+                processed_extension=processed_ext
+            )
+            log.info(f"Adding file '{file_obj.original_filename}' to list of files.")
+            files.append(file_obj)
+
+    # Sort files by basename (since order=True is defined in the dataclass)
+    files.sort()
+
+    return files
+
+
 def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
     log.debug(list_of_files)
@@ -515,6 +561,10 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     # Normalise photoFolder (append with '/' if not already present at the end):
     if photo_folder[len(photo_folder) - 1] != '/':
         photo_folder = photo_folder + '/'
+
+    files = scan_directory(photo_folder)
+    log.info(f"Found {len(files)} files in {photo_folder}")
+    log.debug(f"Files: {files}")
 
     (raw_files, rendered_files, other_files) = get_files(photo_folder)
 
