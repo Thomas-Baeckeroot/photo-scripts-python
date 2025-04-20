@@ -78,9 +78,10 @@ root_folder, FOLDER_FOR_RAWS = load_configuration()
 class ImageFile:
     basename: str
     original_filename: str
-    relative_path: str
-    raw_extension: Optional[str] = None
-    processed_extension: Optional[str] = None
+    raw_relative_path: str
+    raw_filename: Optional[str] = None
+    processed_relative_path: Optional[str] = None
+    processed_filename: Optional[str] = None
     timestamp: Optional[datetime] = None
     exposure_time: Optional[float] = None
     has_gps: bool = False
@@ -90,23 +91,26 @@ class ImageFile:
 
 def log_files(files, folder):
     log.info(f"Found {len(files)} files in '{folder}':")
-    log.debug("┌──────────────────────────────────────────┬───────────┬─────────────────────┬───────┬─────┬──────────────┐")
-    log.debug("| path                /original_filename   | raw / ldr |      timestamp      |exp.(s)| gps | group        |")
+    log.debug("┌────────────────────────────────────────────┬───────────────────────────────┬───────────────────────────────┬─────────────────────┬───────┬─────┬──────────────┐")
+    log.debug("| basename             (original_filename)   | raw                           | processed                     |      timestamp      |exp.(s)| gps | group        |")
     previous_group_id = "STARTING"
     for file in files:
         if file.group_id != previous_group_id :
-            log.debug("├──────────────────────────────────────────┼───────────┼─────────────────────┼───────┼─────┼──────────────┤")
+            log.debug("├────────────────────────────────────────────┼───────────────────────────────┼───────────────────────────────┼─────────────────────┼───────┼─────┼──────────────┤")
             previous_group_id = file.group_id
+        raw_file_with_path = f"{file.raw_relative_path} {file.raw_filename}" if file.raw_filename else "  -"
+        processed_file_with_path = f"{file.processed_relative_path} {file.processed_filename}" if file.processed_filename else "  -"
         log.debug(
-            f"| {file.relative_path:<20}/{file.original_filename:<20}"
-            f"| {file.raw_extension or '  -':<4}/{file.processed_extension or '  -':<5}"
+            f"| {file.basename:<20} ({file.original_filename:<20})"
+            f"| {raw_file_with_path:<30}"
+            f"| {processed_file_with_path:<30}"
             f"| {f'{file.timestamp}' if file.timestamp is not None else '---- -- -- --:--:--'} "
             f"| {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} "
             f"| {'yes' if file.has_gps else 'no '} "
             f"| {file.group_id or '-'} ({file.group_type or '-'}) "
             #f"|"  # todo Adjust last column width
         )
-    log.debug("└──────────────────────────────────────────┴───────────┴─────────────────────┴───────┴─────┴──────────────┘")
+    log.debug("└────────────────────────────────────────────┴───────────────────────────────┴───────────────────────────────┴─────────────────────┴───────┴─────┴──────────────┘")
 
 
 def log_title(title):
@@ -135,23 +139,38 @@ def scan_directory(root_directory):
             # Extract basename (name without extension) and extension
             basename, ext = os.path.splitext(filename)
 
-            # Calculate relative path from root directory
+            # Calculate the relative path from the root directory
             rel_path = os.path.relpath(dirpath, root_directory)
             if rel_path == ".":  # If it's the root directory
                 rel_path = ""
-            rel_path = "/" + rel_path if rel_path else "/"
+            rel_path = "/" + rel_path + "/" if rel_path else "/"
 
             # Determine if it's a RAW or processed image
-            raw_ext = ext if ext.lower() in RAW_EXTENSIONS else None
-            processed_ext = ext if ext.lower() in RENDERED_EXTENSIONS else None
+            if ext.lower() in RAW_EXTENSIONS:
+                raw_relative_path = rel_path
+                raw_filename = filename
+                processed_relative_path = None
+                processed_filename = None
+            elif ext.lower() in RENDERED_EXTENSIONS:
+                raw_relative_path = None
+                raw_filename = None
+                processed_relative_path = rel_path
+                processed_filename = filename
+            else:
+                raw_relative_path = None
+                raw_filename = None
+                processed_relative_path = None
+                processed_filename = None
+                log.info(f"File '{filename}' is neither a RAW nor a processed image. Skipping.")
 
             # Create and add the ImageFile instance
             file_obj = ImageFile(
                 basename=basename,
                 original_filename=filename,
-                relative_path=rel_path,
-                raw_extension=raw_ext,
-                processed_extension=processed_ext
+                raw_relative_path=rel_path,
+                raw_filename=raw_filename,
+                processed_relative_path=processed_relative_path,
+                processed_filename=processed_filename
             )
             log.info(f"Adding file '{file_obj.original_filename}' to list of files.")
             files.append(file_obj)
@@ -221,13 +240,13 @@ def extract_image_metadata(photo_folder, files):
 
     for file in files:
         # Only process files that are images (RAW or processed)
-        if file.raw_extension or file.processed_extension:
+        if file.raw_filename or file.processed_filename:
             full_path = os.path.join(
                 photo_folder,
-                file.relative_path.lstrip('/'),
+                file.raw_relative_path.lstrip('/'),
                 file.original_filename
             )
-            log.debug(f" ⮦⬐⮶ Processing image file '{full_path}'...")
+            log.debug(f" ⬐Processing image file '{full_path}'...")
 
             exif = get_exif(full_path)
 
@@ -282,17 +301,19 @@ def consolidate_images(files):
             # File with this basename already exists, consolidate information
             existing = consolidated[file.basename]
 
-            # Check for RAW extension
-            if file.raw_extension and not existing.raw_extension:
-                existing.raw_extension = file.raw_extension
-            elif file.raw_extension and existing.raw_extension and file.raw_extension != existing.raw_extension:
-                log.warning(f"Multiple RAW formats for {file.basename}: {existing.raw_extension} and {file.raw_extension}")
+            # Check for a RAW image file:
+            if file.raw_filename and not existing.raw_filename:
+                existing.raw_relative_path = file.raw_relative_path
+                existing.raw_filename = file.raw_filename
+            elif file.raw_filename and existing.raw_filename and file.raw_filename != existing.raw_filename:
+                log.warning(f"Multiple RAW formats for {file.basename}: {existing.raw_relative_path}{existing.raw_filename} and {file.raw_relative_path}{file.raw_filename}")
 
-            # Check for processed extension
-            if file.processed_extension and not existing.processed_extension:
-                existing.processed_extension = file.processed_extension
-            elif file.processed_extension and existing.processed_extension and file.processed_extension != existing.processed_extension:
-                log.warning(f"Multiple processed formats for {file.basename}: {existing.processed_extension} and {file.processed_extension}")
+            # Check for a processed image file:
+            if file.processed_filename and not existing.processed_filename:
+                existing.processed_relative_path = file.processed_relative_path
+                existing.processed_filename = file.processed_filename
+            elif file.processed_filename and existing.processed_filename and file.processed_filename != existing.processed_filename:
+                log.warning(f"Multiple processed files for {file.basename}: {existing.processed_relative_path}{existing.processed_filename} and {file.processed_relative_path}{file.processed_filename}")
 
             # Check timestamps
             if file.timestamp and not existing.timestamp:
@@ -313,12 +334,8 @@ def consolidate_images(files):
             # Set has_gps to True if either file has GPS data
             existing.has_gps = existing.has_gps or file.has_gps
 
-            # Different relative paths might indicate file is in multiple locations
-            if file.relative_path != existing.relative_path:
-                log.warning(f"File {file.basename} exists in multiple locations: {existing.relative_path} and {file.relative_path}")
-
         else:
-            # First time seeing this basename, add to consolidated dictionary
+            # First time seeing this basename, add to the consolidated dictionary
             consolidated[file.basename] = file
 
     # Convert dictionary values back to a list
@@ -909,16 +926,23 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
 
     files = scan_directory(photo_folder)
     log.info(f"Found {len(files)} files in {photo_folder}")
-    log.debug(f"Files: {files}")
+    log_files(files, photo_folder)
 
     # Extract metadata from images:
     files = extract_image_metadata(photo_folder, files)
+    log_files(files, photo_folder)
 
     # Consolidate files with the same basename:
     files = consolidate_images(files)
+    log_files(files, photo_folder)
 
     # Identify image groups
     files = identify_advanced_image_groups(files)
+
+    log_title("EXIT")
+    log_files(files, photo_folder)
+    exit(-100)
+    files = move_raws()
 
     # Older method being deprecated:
     (raw_files, rendered_files, other_files) = get_files(photo_folder)
