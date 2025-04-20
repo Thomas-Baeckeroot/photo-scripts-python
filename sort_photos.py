@@ -2,20 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-This script is expected to be launched right after having downloaded pictures from digital camera.
-It aims to organize raw files in a separated folder,
-group set of pictures in one folder,
-geo-tags pictures if a .gpx file is given.
+This script is usually launched right after having downloaded pictures from digital cameras onto your computer.
+It aims to organize picture files: Raws in a separated folder, panorama grouped in a folder, processed files
+(jpg/avif) generated in the root folder from the raw files if none are found. If pictures are not geo-tagged,
+this script bases itself on a .gpx file to add location into the picture (if .gpx file available).
 
-The expected folder (before) is as:
-/Image-root
-    /2024                 (year)
-        /2024-06-15_Day-short-description
-            /RAW          (will be created by script)
+More in README.md
 """
 
 import configparser
 import glob
+import json
 import logging
 import os
 import subprocess
@@ -54,19 +51,28 @@ logging.basicConfig(
     format='%(asctime)s\t%(levelname)s\t%(filename)s:%(lineno)d\t%(message)s')
 log = logging.getLogger("sort_photos.py")  # %(name)s
 
-config = configparser.ConfigParser()
-# define default values:
-config['Folders'] = {}
-config['Folders']['root'] = '~/Images'
-config['Folders']['raw'] = 'RAW'
 
-config_path = os.path.expanduser('~/.config/sort_photo.conf')
-config.read(config_path)
+def load_configuration():
+    config = configparser.ConfigParser()
+    # define default values:
+    config.read_dict({
+        'Folders': {
+            'root': '~/Images',
+            'raw': 'RAW'
+        }
+    })
 
-root_folder = os.path.expanduser(config['Folders']['root'])
-# Folder where raw files will be moved to (without final '/'):
-FOLDER_FOR_RAWS = config['Folders']['raw']
+    config_path = os.path.expanduser('~/.config/sort_photo.conf')
+    config.read(config_path)
 
+    root_folder = os.path.expanduser(config['Folders']['root'])  # FIXME Not used yet! root-folder will be used only if sort_photos.py is called without folder as argument.
+    # Folder where raw files will be moved to (without final '/'):
+    FOLDER_FOR_RAWS = config['Folders']['raw']
+    return root_folder, FOLDER_FOR_RAWS
+
+
+root_folder, FOLDER_FOR_RAWS = load_configuration()
+# if more global values must be used, then we would use config=load_configuration() and get them separately.
 
 @dataclass(order=True)
 class ImageFile:
@@ -80,6 +86,27 @@ class ImageFile:
     has_gps: bool = False
     group_id: Optional[str] = None  # Identifiant du groupe (panorama, HDR, etc.)
     group_type: Optional[str] = None  # Type de groupe: "panorama", "hdr", "focus"
+
+
+def log_files(files, folder):
+    log.info(f"Found {len(files)} files in '{folder}':")
+    log.debug("┌──────────────────────────────────────────┬───────────┬─────────────────────┬───────┬─────┬──────────────┐")
+    log.debug("| path                /original_filename   | raw / ldr |      timestamp      |exp.(s)| gps | group        |")
+    previous_group_id = "STARTING"
+    for file in files:
+        if file.group_id != previous_group_id :
+            log.debug("├──────────────────────────────────────────┼───────────┼─────────────────────┼───────┼─────┼──────────────┤")
+            previous_group_id = file.group_id
+        log.debug(
+            f"| {file.relative_path:<20}/{file.original_filename:<20}"
+            f"| {file.raw_extension or '  -':<4}/{file.processed_extension or '  -':<5}"
+            f"| {f'{file.timestamp}' if file.timestamp is not None else '---- -- -- --:--:--'} "
+            f"| {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} "
+            f"| {'yes' if file.has_gps else 'no '} "
+            f"| {file.group_id or '-'} ({file.group_type or '-'}) "
+            #f"|"  # todo Adjust last column width
+        )
+    log.debug("└──────────────────────────────────────────┴───────────┴─────────────────────┴───────┴─────┴──────────────┘")
 
 
 def log_title(title):
@@ -98,6 +125,7 @@ def scan_directory(root_directory):
     Returns:
         list[ImageFile]: List of all files found
     """
+    log_title(f"Scanning directory '{root_directory}'")
     files = []
     root_directory = os.path.abspath(root_directory)
 
@@ -134,17 +162,57 @@ def scan_directory(root_directory):
     return files
 
 
-def extract_image_metadata(files):
+def get_exif_with_exiftool(filepath):
+    try:
+        result = subprocess.run(
+            ["exiftool", "-j", filepath],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        exif_data = json.loads(result.stdout)[0]
+        return exif_data
+    except Exception as e:
+        log.warning(f"Could not extract EXIF using exiftool for {filepath}: {e}")
+        return {}
+
+
+def get_exif(filepath):
+    # if exif data should be extracted without exiftool, then we should re-use method get_exif_as_dict(file_name) below.
+    return get_exif_with_exiftool(filepath)
+
+
+def parse_exposure_time(value):
+    """Returns the exposure time as a float."""
+    try:
+        if isinstance(value, tuple) and len(value) == 2:
+            # EXIF stores exposure as a fraction (tuple of numerator, denominator)
+            return value[0] / value[1]
+        elif isinstance(value, str) and '/' in value:
+                # EXIF stores exposure as a fraction string, ex.: "1/80"
+                num, den = value.split('/')
+                return float(num) / float(den)
+        else:
+            # EXIF stores exposure as a float (or its representation as a string)
+            return float(value)
+    except Exception as e:
+        log.error(f"Could not parse exposure time '{value}': {e}")
+        return None
+
+
+def extract_image_metadata(photo_folder, files):
     """
     Extracts metadata (timestamp, exposure time, GPS info) from image files
     and updates ImageFile objects using named EXIF tags.
 
-    Args:
-        files (list[ImageFile]): List of ImageFile objects to process
-
     Returns:
         list[ImageFile]: Updated list of ImageFile objects with extracted metadata
+
+    :param photo_folder: Root location of pictures in 'files'
+    :param files: List of ImageFile objects to process (list[ImageFile])
     """
+    log_title("Extracting image metadata")
     # Define EXIF tag constants
     EXIF_DATETIME_ORIGINAL = 'DateTimeOriginal'
     EXIF_DATETIME = 'DateTime'
@@ -155,50 +223,38 @@ def extract_image_metadata(files):
         # Only process files that are images (RAW or processed)
         if file.raw_extension or file.processed_extension:
             full_path = os.path.join(
-                root_folder,
+                photo_folder,
                 file.relative_path.lstrip('/'),
                 file.original_filename
             )
+            log.debug(f" ⮦⬐⮶ Processing image file '{full_path}'...")
 
-            try:
-                # Try to open the image file
-                with Image.open(full_path) as img:
-                    # Extract EXIF data
-                    exif_data = img._getexif()
+            exif = get_exif(full_path)
 
-                    if exif_data:
-                        # Convert numeric tags to named tags
-                        exif = {TAGS.get(tag_id, tag_id): value for tag_id, value in exif_data.items()}
+            # Extract timestamp
+            if EXIF_DATETIME_ORIGINAL in exif:
+                date_str = exif[EXIF_DATETIME_ORIGINAL]
+                try:
+                    file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                except ValueError:
+                    log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
+            elif EXIF_DATETIME in exif:
+                date_str = exif[EXIF_DATETIME]
+                try:
+                    file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                except ValueError:
+                    log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
 
-                        # Extract timestamp
-                        if EXIF_DATETIME_ORIGINAL in exif:
-                            date_str = exif[EXIF_DATETIME_ORIGINAL]
-                            try:
-                                file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
-                            except ValueError:
-                                log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
-                        elif EXIF_DATETIME in exif:
-                            date_str = exif[EXIF_DATETIME]
-                            try:
-                                file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
-                            except ValueError:
-                                log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
+            # Extract exposure time
+            if EXIF_EXPOSURE_TIME in exif:
+                file.exposure_time = parse_exposure_time(exif[EXIF_EXPOSURE_TIME])
 
-                        # Extract exposure time
-                        if EXIF_EXPOSURE_TIME in exif:
-                            exposure = exif[EXIF_EXPOSURE_TIME]
-                            # EXIF stores exposure as a fraction (tuple of numerator, denominator)
-                            if isinstance(exposure, tuple) and len(exposure) == 2:
-                                file.exposure_time = exposure[0] / exposure[1]
-                            else:
-                                file.exposure_time = float(exposure)
+            # Check if GPS data exists
+            file.has_gps = EXIF_GPS_INFO in exif and exif[EXIF_GPS_INFO]
 
-                        # Check if GPS data exists
-                        file.has_gps = EXIF_GPS_INFO in exif and exif[EXIF_GPS_INFO]
-
-            except (IOError, AttributeError, KeyError) as e:
-                log.warning(f"Could not process EXIF data for {file.original_filename}: {str(e)}")
-        log.debug(f"File '{file.original_filename}': timestamp={file.timestamp}; exposure={file.exposure_time}; has GPS info = {file.has_gps}")
+            log.debug(f"File '{file.original_filename}': timestamp={file.timestamp}; exposure={file.exposure_time}; has GPS info = {file.has_gps}")
+        else:
+            log.debug(f"File '{file.original_filename}' not identified as image (=> not checking EXIF data for timestamp, exposure time, or GPS info).")
 
     return files
 
@@ -215,6 +271,7 @@ def consolidate_images(files):
     Returns:
         list[ImageFile]: Consolidated list of ImageFile objects
     """
+    log_title("Consolidating image files")
     # Dictionary to store consolidated files, keyed by basename
     consolidated = {}
 
@@ -286,6 +343,7 @@ def identify_image_groups(files):
     Returns:
         list[ImageFile]: Updated list with group information
     """
+    log.info("Identifying image groups")
     # Sort files by timestamp first
     sorted_files = sorted([f for f in files if f.timestamp], key=lambda x: x.timestamp)
 
@@ -379,6 +437,7 @@ def identify_advanced_image_groups(files):
     Returns:
         list[ImageFile]: Updated list with group information
     """
+    log_title("Identifying advanced image groups")
     # Basic grouping by time first
     files = identify_image_groups(files)
 
@@ -433,18 +492,18 @@ def get_newest_gpx_in_parent(folder):
         return str(latest_file)  # FIXME Should be "../abc.gpx"
 
 
-def get_exif(file_name):
-    # Get exif information from file given in parameter
+def get_exif_as_dict(file_name):
+    """Get exif information from file given in parameter"""
     ret = {}
-    i = Image.open(file_name)
-    info = i._getexif()
-    if not info:
-        # Have a try if .getexif() works better:
-        info = i.getexif()
-        if info:
-            log.warning(f"│ Method .getexif() worked while ._getexit() failed for file '{file_name}'")
-    if info:
-        for tag, value in info.items():
+    with Image.open(file_name) as img:
+        exif_data = img._getexif()
+        if not exif_data:
+            # Have a try if .getexif() works better:
+            exif_data = img.getexif()
+            if exif_data:
+                log.warning(f"│ Method .getexif() worked while ._getexit() failed for file '{file_name}'")
+    if exif_data:
+        for tag, value in exif_data.items():
             decoded = TAGS.get(tag, tag)
             ret[decoded] = value
     else:
@@ -454,7 +513,7 @@ def get_exif(file_name):
 
 def get_exposure_time_from_exif(file_name):
     # Get exposure time (in seconds) of file given in parameter from exif information
-    exif_of_filename = get_exif(file_name)
+    exif_of_filename = get_exif_as_dict(file_name)
     ssv = exif_of_filename['ShutterSpeedValue']
 
     # Example for exposure of 1/6th of second:
@@ -491,7 +550,7 @@ def get_date_time_original_from_exif(file_name):
     # DateTimeDigitized = 2016:11:06 00:30:48
     # DateTime = 2016:11:06 00:30:48
     _EXIF_TIME_FORMAT = '%Y:%m:%d %H:%M:%S'
-    exif_of_file_name = get_exif(file_name)
+    exif_of_file_name = get_exif_as_dict(file_name)
     try:
         dt_original_unicode = exif_of_file_name['DateTimeOriginal']
     except KeyError:
@@ -853,7 +912,7 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     log.debug(f"Files: {files}")
 
     # Extract metadata from images:
-    files = extract_image_metadata(files)
+    files = extract_image_metadata(photo_folder, files)
 
     # Consolidate files with the same basename:
     files = consolidate_images(files)
