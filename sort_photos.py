@@ -19,7 +19,8 @@ import subprocess
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from PIL import Image  # If PIL module not installed, then: `pip install Pillow`, soon pillow-avif-plugin will also be required
+from PIL import Image  # If PIL module not installed, then: `pip install Pillow`
+# soon pillow-avif-plugin will also be required
 from PIL.ExifTags import TAGS
 from sys import argv
 from typing import Optional
@@ -65,13 +66,16 @@ def load_configuration():
     config_path = os.path.expanduser('~/.config/sort_photo.conf')
     config.read(config_path)
 
-    root_folder = os.path.expanduser(config['Folders']['root'])  # FIXME Not used yet! root-folder will be used only if sort_photos.py is called without folder as argument.
+    root_folder_load_cfg = os.path.expanduser(config['Folders']['root'])  # FIXME Not used yet!
+    # root-folder will be used only if sort_photos.py is called without folder as argument.
     # Folder where raw files will be moved to (without final '/'):
-    FOLDER_FOR_RAWS = config['Folders']['raw']
-    return root_folder, FOLDER_FOR_RAWS
+    folder_for_raws_load_cfg = config['Folders']['raw']
+    return root_folder_load_cfg, folder_for_raws_load_cfg
 
 
 root_folder, FOLDER_FOR_RAWS = load_configuration()
+
+
 # if more global values must be used, then we would use config=load_configuration() and get them separately.
 
 @dataclass(order=True)
@@ -88,6 +92,7 @@ class ImageFile:
     group_id: Optional[str] = None  # Identifiant du groupe (panorama, HDR, etc.)
     group_type: Optional[str] = None  # Type de groupe: "panorama", "hdr", "focus"
 
+
 @dataclass(order=True)
 class GroupInfo:
     group_id: int
@@ -103,12 +108,15 @@ class GroupInfo:
 
 def log_files(files, folder):
     log.info(f"Found {len(files)} files in '{folder}':")
-    log.debug("┌────────────────────────────────────────────┬───────────────────────────────┬───────────────────────────────┬─────────────────────┬───────┬─────┬──────────────┐")
-    log.debug("| basename             (original_filename)   | raw                           | processed                     |      timestamp      |exp.(s)| gps | group (type) |")
+    log.debug(
+        "┌────────────────────────────────────────────┬───────────────────────────────┬───────────────────────────────┬─────────────────────┬───────┬─────┬──────────────┐")
+    log.debug(
+        "| basename             (original_filename)   | raw                           | processed                     |      timestamp      |exp.(s)| gps | group (type) |")
     previous_group_id = "STARTING"
     for file in files:
-        if file.group_id != previous_group_id :
-            log.debug("├────────────────────────────────────────────┼───────────────────────────────┼───────────────────────────────┼─────────────────────┼───────┼─────┼──────────────┤")
+        if file.group_id != previous_group_id:
+            log.debug(
+                "├────────────────────────────────────────────┼───────────────────────────────┼───────────────────────────────┼─────────────────────┼───────┼─────┼──────────────┤")
             previous_group_id = file.group_id
         raw_file_with_path = f"{file.raw_relative_path} {file.raw_filename}" if file.raw_filename else "  -"
         processed_file_with_path = f"{file.processed_relative_path} {file.processed_filename}" if file.processed_filename else "  -"
@@ -120,9 +128,10 @@ def log_files(files, folder):
             f"| {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} "
             f"| {'yes' if file.has_gps else 'no '} "
             f"| {file.group_id or '-'} ({file.group_type or '-'}) "
-            #f"|"  # todo Adjust last column width
+            # f"|"  # todo Adjust last column width
         )
-    log.debug("└────────────────────────────────────────────┴───────────────────────────────┴───────────────────────────────┴─────────────────────┴───────┴─────┴──────────────┘")
+    log.debug(
+        "└────────────────────────────────────────────┴───────────────────────────────┴───────────────────────────────┴─────────────────────┴───────┴─────┴──────────────┘")
 
 
 def log_title(title):
@@ -221,9 +230,9 @@ def parse_exposure_time(value):
             # EXIF stores exposure as a fraction (tuple of numerator, denominator)
             return value[0] / value[1]
         elif isinstance(value, str) and '/' in value:
-                # EXIF stores exposure as a fraction string, ex.: "1/80"
-                num, den = value.split('/')
-                return float(num) / float(den)
+            # EXIF stores exposure as a fraction string, ex.: "1/80"
+            num, den = value.split('/')
+            return float(num) / float(den)
         else:
             # EXIF stores exposure as a float (or its representation as a string)
             return float(value)
@@ -283,9 +292,13 @@ def extract_image_metadata(photo_folder, files):
             # Check if GPS data exists
             file.has_gps = EXIF_GPS_INFO in exif and exif[EXIF_GPS_INFO]
 
-            log.debug(f"File '{file.original_filename}': timestamp={file.timestamp}; exposure={file.exposure_time}; has GPS info = {file.has_gps}")
+            log.debug(f"File '{file.original_filename}': "
+                      f"timestamp={file.timestamp}; "
+                      f"exposure={file.exposure_time}; "
+                      f"has GPS info = {file.has_gps}")
         else:
-            log.debug(f"File '{file.original_filename}' not identified as image (=> not checking EXIF data for timestamp, exposure time, or GPS info).")
+            log.debug(f"File '{file.original_filename}' "
+                      f"not identified as image (=> not checking EXIF data for timestamp, exposure time, or GPS info).")
 
     return files
 
@@ -318,14 +331,18 @@ def consolidate_images(files):
                 existing.raw_relative_path = file.raw_relative_path
                 existing.raw_filename = file.raw_filename
             elif file.raw_filename and existing.raw_filename and file.raw_filename != existing.raw_filename:
-                log.warning(f"Multiple RAW formats for {file.basename}: {existing.raw_relative_path}{existing.raw_filename} and {file.raw_relative_path}{file.raw_filename}")
+                log.warning(f"Multiple RAW formats for {file.basename}: "
+                            f"{existing.raw_relative_path}{existing.raw_filename} and "
+                            f"{file.raw_relative_path}{file.raw_filename}")
 
             # Check for a processed image file:
             if file.processed_filename and not existing.processed_filename:
                 existing.processed_relative_path = file.processed_relative_path
                 existing.processed_filename = file.processed_filename
             elif file.processed_filename and existing.processed_filename and file.processed_filename != existing.processed_filename:
-                log.warning(f"Multiple processed files for {file.basename}: {existing.processed_relative_path}{existing.processed_filename} and {file.processed_relative_path}{file.processed_filename}")
+                log.warning(f"Multiple processed files for {file.basename}: "
+                            f"{existing.processed_relative_path}{existing.processed_filename} and "
+                            f"{file.processed_relative_path}{file.processed_filename}")
 
             # Check timestamps
             if file.timestamp and not existing.timestamp:
@@ -340,8 +357,11 @@ def consolidate_images(files):
             # Check exposure time
             if file.exposure_time and not existing.exposure_time:
                 existing.exposure_time = file.exposure_time
-            elif file.exposure_time and existing.exposure_time and abs(file.exposure_time - existing.exposure_time) > 0.001:
-                log.warning(f"Exposure time mismatch for {file.basename}: {existing.exposure_time}s vs {file.exposure_time}s")
+            elif (file.exposure_time
+                  and existing.exposure_time
+                  and abs(file.exposure_time - existing.exposure_time) > 0.001):
+                log.warning(f"Exposure time mismatch for {file.basename}: "
+                            f"{existing.exposure_time}s vs {file.exposure_time}s")
 
             # Set has_gps to True if either file has GPS data
             existing.has_gps = existing.has_gps or file.has_gps
@@ -386,7 +406,8 @@ def review_and_cleanup_groups(files, groups):
                     f.group_type = "group"
                     log.debug(f"\tReassigned group_id '{f.group_id}' to {group.first_image}")
                     break  # only one file to remove to group => exit loop on files
-            log.info(f"\tGroup {group.group_id} with {group.n_images} images: {group.first_image} and {group.last_image}")
+            log.info(f"\tGroup {group.group_id} with {group.n_images} images: "
+                     f"{group.first_image} and {group.last_image}")
 
     log.warning(groups)
     # Count groups
@@ -461,7 +482,8 @@ def identify_image_groups(files):
                 )
                 groups.append(group_obj)
                 previous_image_part_of_group = True
-                log.debug(f"\t\tStarting new group {current_group_id} with first shot {previous_image_basename} and last shot {file.basename} (for now)")
+                log.debug(f"\t\tStarting new group {current_group_id} with "
+                          f"first shot {previous_image_basename} and last shot {file.basename} (for now)")
             else:
                 # update last_image and increment n_images in current group (last one added to groups):
                 groups[-1].last_image = file.basename
@@ -564,7 +586,8 @@ def confirm_groups(files):
             if group_id and file.group_id == group_id:
                 last_picture = file.basename
                 serie_of_photos.append(file.basename)
-                log.info(f"║ {file.basename:<20}│ {file.timestamp} │ {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} ║")
+                log.info(
+                    f"║ {file.basename:<20}│ {file.timestamp} │ {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} ║")
 
         if group_id:
             log.info("╚═════════════════════╧═════════════════════╧═══════╝")
@@ -574,7 +597,8 @@ def confirm_groups(files):
             log.info(f"What should be done with this group? '{sub_folder_name}' ")
             log.info("- [P]anorama: keep group, generate png, create Hugin script (default)")
             log.info("- [C]ancel: images were incorrectly detected as a group")
-            log.info("- [O]ther: group is correct but not a panorama: keep group, generate png but do not create Hugin script")
+            log.info("- [O]ther: group is correct but not a panorama:"
+                     " keep group, generate png but do not create Hugin script")
             choice = input("\nEnter your choice [P/C/O]:")
             if choice.lower() == "p" or choice == "":
                 log.info("Group confirmed as Panorama")
@@ -592,7 +616,8 @@ def confirm_groups(files):
                 if file.group_id == group_id:
                     file.group_id = sub_folder_name
                     file.group_type = choice
-                    log.debug(f"\tReclassified {file.basename} from {group_id}(group) to {file.group_id} ({file.group_type}).")
+                    log.debug(f"\tReclassified {file.basename}"
+                              f" from {group_id}(group) to {file.group_id} ({file.group_type}).")
 
         else:
             log.info("No more groups to validate.")
@@ -719,7 +744,7 @@ def create_avif_for_raw(photo_folder, raw_file):
     split_filename = os.path.splitext(raw_file)
     basename = split_filename[0]
     extension: str = split_filename[1]
-    #if extension.lower() in {"exif"}:
+    # if extension.lower() in {"exif"}:
     #    # Pillow accepted formats: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
     if extension.lower() == "cr3":
         image_cr3 = None  # TODO Implementation on hold...
@@ -884,17 +909,16 @@ def create_sub_folder_name(serie_of_photos, serie_is_hdr):
     first_picture = serie_of_photos[0]  # Added [:-4] used to be there to drop the extension
     last_picture = serie_of_photos[len(serie_of_photos) - 1]
     subfolder_name = first_picture + "-"  # Starts with the name of first picture
-    continue_loop_char = True
     i = 0
-    while continue_loop_char:
+    while True:
         if first_picture[i] == last_picture[i]:
             # i-th char of each file is identical
             i = i + 1
             if i >= len(first_picture) or i >= len(last_picture):
-                continue_loop_char = False  # Why not break?
+                break
         else:
             # i-th char of each file is different => exiting the loop
-            continue_loop_char = False  # Why not break?
+            break
     subfolder_name = subfolder_name + last_picture[i:] + "_" + str(len(serie_of_photos))
     if serie_is_hdr:
         subfolder_name = subfolder_name + "_HDR"
@@ -902,7 +926,6 @@ def create_sub_folder_name(serie_of_photos, serie_is_hdr):
 
 
 def group_pictures_by_time(photo_folder, rendered_files):
-
     log_title("Manage remaining jpegs")
 
     rendered_files.sort()
