@@ -88,6 +88,18 @@ class ImageFile:
     group_id: Optional[str] = None  # Identifiant du groupe (panorama, HDR, etc.)
     group_type: Optional[str] = None  # Type de groupe: "panorama", "hdr", "focus"
 
+@dataclass(order=True)
+class GroupInfo:
+    group_id: int
+    first_image: str
+    last_image: str
+    n_images: int
+    # todo To be used later to determine the type of group:
+    # group_type: str = "group"  # "group" meaning undetermined. Changed after to "panorama", "hdr", "focus", ...
+    # total_shooting_time: float = 0.0
+    # min_ev: float = None  # with EV = ISO * exposition_time / (f-stop)^2
+    # max_ev: float = None
+
 
 def log_files(files, folder):
     log.info(f"Found {len(files)} files in '{folder}':")
@@ -361,26 +373,31 @@ def identify_image_groups(files):
         list[ImageFile]: Updated list with group information
     """
     log.info("Identifying image groups")
-    # Sort files by timestamp first
-    sorted_files = sorted([f for f in files if f.timestamp], key=lambda x: x.timestamp)
 
-    if not sorted_files:
+    # Optional: sort by timestamp
+    # (issue: Canon camera can "RAW image processing" retrospectively and create a processed image with a NEW number
+    # that cannot be consolidated with the original raw)
+    # sorted_files = sorted([f for f in files if f.timestamp], key=lambda x: x.timestamp)
+
+    if not files:
         log.warning("No files with timestamps available for grouping")
         return files
 
-    log.info(f"Analyzing {len(sorted_files)} files with timestamps for series identification")
+    log.info(f"Analyzing {len(files)} files with timestamps for series identification")
 
+    groups = []
     current_group = None
-    current_group_type = None
+    previous_image_part_of_group: bool = False
     current_group_id = 0
-    last_timestamp = None
+    last_timestamp = datetime(1970, 1, 1)
+    previous_image_basename = None
 
-    # Parameters for group identification
-    MAX_TIME_PANORAMA = MIN_TIME_BETWEEN_PANOS  # Use constant from your code
-    MAX_TIME_HDR = 3  # Maximum seconds between HDR shots
-    MAX_TIME_FOCUS = 5  # Maximum seconds between focus bracketing shots
+    # Groups can be: panorama, hdr, focus bracketing, burst, etc.
+    # This method only makes groups of pictures.
+    # Differentiation between HDR, bracketing focus and other will be made differently later.
 
-    for file in sorted_files:
+    for file in files:
+        log.debug(f"Verifying if {file.basename} is part of a group...")
         # Skip if no timestamp
         if not file.timestamp:
             continue
@@ -390,56 +407,76 @@ def identify_image_groups(files):
             last_timestamp = file.timestamp
             continue
 
-        # Calculate time difference from previous shot
-        time_diff = (file.timestamp - last_timestamp).total_seconds()
+        # Calculate time difference from the previous shot (time between to shots, not including exposure time that can be seconds for nightly panoramas)
+        time_diff = (file.timestamp - last_timestamp).total_seconds() - file.exposure_time
 
         # Determine if this is part of a series
-        if time_diff <= MAX_TIME_HDR:
-            # Very close shots are likely HDR or exposure bracketing
-            if current_group_type != "hdr" or time_diff > MAX_TIME_HDR:
-                # Start new HDR group
-                current_group_id += 1
-                current_group_type = "hdr"
-
-            file.group_id = f"hdr_{current_group_id}"
-            file.group_type = "hdr"
-            log.debug(f"Added {file.basename} to HDR group {current_group_id}")
-
-        elif time_diff <= MAX_TIME_FOCUS:
-            # Close shots might be focus bracketing
-            if current_group_type != "focus" or time_diff > MAX_TIME_FOCUS:
-                # Start new focus bracketing group
-                current_group_id += 1
-                current_group_type = "focus"
-
-            file.group_id = f"focus_{current_group_id}"
-            file.group_type = "focus"
-            log.debug(f"Added {file.basename} to focus bracketing group {current_group_id}")
-
-        elif time_diff <= MAX_TIME_PANORAMA:
+        if time_diff <= MIN_TIME_BETWEEN_PANOS:
             # Shots within panorama time range
-            if current_group_type != "panorama" or time_diff > MAX_TIME_PANORAMA:
-                # Start new panorama group
+            if not previous_image_part_of_group:
+                # Start a new group
                 current_group_id += 1
-                current_group_type = "panorama"
+                if previous_image_basename is None:
+                    previous_image_basename = "ERROR"
+                    log.error(f"\t\tNo previous image basename for group {current_group_id}! (this should not happen)")
+                group_obj = GroupInfo(
+                    group_id=current_group_id,
+                    first_image=previous_image_basename,
+                    last_image=file.basename,
+                    n_images=2
+                )
+                groups.append(group_obj)
+                previous_image_part_of_group = True
+                log.debug(f"\t\tStarting new group {current_group_id} with first shot {previous_image_basename} and last shot {file.basename} (for now)")
+            else:
+                # update last_image and increment n_images in current group (last one added to groups):
+                groups[-1].last_image = file.basename
+                groups[-1].n_images += 1
 
-            file.group_id = f"panorama_{current_group_id}"
-            file.group_type = "panorama"
-            log.debug(f"Added {file.basename} to panorama group {current_group_id}")
+            file.group_id = f"group_{current_group_id}"
+            file.group_type = "group"
+            log.debug(f"\tAdded {file.basename} to group {current_group_id}")
 
         else:
             # This shot doesn't belong to a series
-            current_group_type = None
+            previous_image_part_of_group = False
 
         # Update last timestamp
         last_timestamp = file.timestamp
+        previous_image_basename = file.basename
 
+    log.warning(groups)
+
+    # Walk through each group in order to:
+    # - drop it if 2 images only
+    # - inform the group in group_id of the first image
+    for group in groups:
+        log.debug(f"Walking through group {group.group_id} with {group.n_images} images...")
+        if group.n_images == 2:
+            log.warning(f"\tDropping group {group.group_id} with 2 images: {group.first_image} and {group.last_image}")
+            # Get ImageFile object from images with basename = group.last_image
+            for f in files:
+                if f.basename == group.last_image:
+                    f.group_id = None
+                    f.group_type = None
+                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.last_image}")
+                    # set this group.n_images to 0 in groups:
+                    group.n_images = 0
+                    break  # only one file to remove to group => exit loop on files
+        else:
+            # Get ImageFile object from images with basename = group.first_image
+            for f in files:
+                if f.basename == group.first_image:
+                    f.group_id = f"group_{group.group_id}"
+                    f.group_type = "group"
+                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.first_image}")
+                    break  # only one file to remove to group => exit loop on files
+            log.info(f"\tGroup {group.group_id} with {group.n_images} images: {group.first_image} and {group.last_image}")
+
+    log.warning(groups)
     # Count groups
-    panorama_groups = len(set(f.group_id for f in files if f.group_type == "panorama"))
-    hdr_groups = len(set(f.group_id for f in files if f.group_type == "hdr"))
-    focus_groups = len(set(f.group_id for f in files if f.group_type == "focus"))
-
-    log.info(f"Identified {panorama_groups} panorama groups, {hdr_groups} HDR groups, and {focus_groups} focus bracketing groups")
+    n_groups = len(set(f.group_id for f in files if f.group_type == "group"))
+    log.info(f"Identified {n_groups} panorama groups")
 
     return files
 
@@ -457,42 +494,53 @@ def identify_advanced_image_groups(files):
     log_title("Identifying advanced image groups")
     # Basic grouping by time first
     files = identify_image_groups(files)
+    log_files(files, "<folder>/")
 
     # Additional refinement could be done here
-    # For example, checking exposure_time patterns for HDR
-    # or checking GPS coordinates for panoramas
+    # For example: checking exposure_time patterns for HDR
 
-    # Identify HDR groups by checking exposure variation
-    potential_hdr_groups = {}
-    for file in files:
-        if file.group_type == "hdr" and file.exposure_time:
-            if file.group_id not in potential_hdr_groups:
-                potential_hdr_groups[file.group_id] = []
-            potential_hdr_groups[file.group_id].append(file)
+    # # Identify HDR groups by checking exposure variation
+    # potential_hdr_groups = {}
+    # for file in files:
+    #     if file.group_type == "hdr" and file.exposure_time:
+    #         if file.group_id not in potential_hdr_groups:
+    #             potential_hdr_groups[file.group_id] = []
+    #         potential_hdr_groups[file.group_id].append(file)
+    #
+    # # Verify HDR groups by checking exposure variation
+    # for group_id, group_files in potential_hdr_groups.items():
+    #     if len(group_files) < 2:
+    #         continue
+    #
+    #     exposures = [f.exposure_time for f in group_files if f.exposure_time]
+    #     if not exposures or len(exposures) < 2:
+    #         continue
+    #
+    #     # Check if there's significant exposure variation
+    #     min_exp = min(exposures)
+    #     max_exp = max(exposures)
+    #
+    #     # If max exposure is at least 2x min exposure, it's likely HDR
+    #     if max_exp / min_exp >= 2:
+    #         log.info(f"Confirmed HDR group {group_id} with exposure range: {min_exp}s to {max_exp}s")
+    #     else:
+    #         # Not enough exposure variation, might be something else
+    #         for f in group_files:
+    #             if f.group_type == "hdr":
+    #                 f.group_type = "burst"  # Reclassify as generic burst
+    #                 log.debug(f"Reclassified {f.basename} from HDR to burst (insufficient exposure variation)")
 
-    # Verify HDR groups by checking exposure variation
-    for group_id, group_files in potential_hdr_groups.items():
-        if len(group_files) < 2:
-            continue
+    return files
 
-        exposures = [f.exposure_time for f in group_files if f.exposure_time]
-        if not exposures or len(exposures) < 2:
-            continue
 
-        # Check if there's significant exposure variation
-        min_exp = min(exposures)
-        max_exp = max(exposures)
-
-        # If max exposure is at least 2x min exposure, it's likely HDR
-        if max_exp / min_exp >= 2:
-            log.info(f"Confirmed HDR group {group_id} with exposure range: {min_exp}s to {max_exp}s")
-        else:
-            # Not enough exposure variation, might be something else
-            for f in group_files:
-                if f.group_type == "hdr":
-                    f.group_type = "burst"  # Reclassify as generic burst
-                    log.debug(f"Reclassified {f.basename} from HDR to burst (insufficient exposure variation)")
-
+def confirm_groups(files):
+    """
+    Walks through each file of files to check the group_id and for each group_id confirm with the user if this group is:
+    Correct (default),
+    Incorrect (should be completely dropped)
+    or incomplete (begin/end should be edited).
+    """
+    log.fatal("NOT IMPLEMENTED YET")
     return files
 
 
@@ -914,7 +962,7 @@ def create_avif_for_raws(photo_folder):
 
 def sort_photos(photo_folder: str, gpx_file: str) -> None:
     """
-    Organise pictures in folder.
+    Organise pictures in the folder.
 
     :param photo_folder: Photo folder to be sorted
     :param gpx_file: GPS tracker file to geo-localize picture (if not already)
@@ -938,6 +986,8 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
 
     # Identify image groups
     files = identify_advanced_image_groups(files)
+
+    files = confirm_groups(files)
 
     log_title("EXIT")
     log_files(files, photo_folder)
