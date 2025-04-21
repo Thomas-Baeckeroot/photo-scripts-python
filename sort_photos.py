@@ -104,7 +104,7 @@ class GroupInfo:
 def log_files(files, folder):
     log.info(f"Found {len(files)} files in '{folder}':")
     log.debug("┌────────────────────────────────────────────┬───────────────────────────────┬───────────────────────────────┬─────────────────────┬───────┬─────┬──────────────┐")
-    log.debug("| basename             (original_filename)   | raw                           | processed                     |      timestamp      |exp.(s)| gps | group        |")
+    log.debug("| basename             (original_filename)   | raw                           | processed                     |      timestamp      |exp.(s)| gps | group (type) |")
     previous_group_id = "STARTING"
     for file in files:
         if file.group_id != previous_group_id :
@@ -361,6 +361,40 @@ def consolidate_images(files):
     return result
 
 
+def review_and_cleanup_groups(files, groups):
+    # Walk through each group in order to:
+    # - drop it if 2 images only
+    # - inform the group in group_id of the first image
+    for group in groups:
+        log.debug(f"Walking through group {group.group_id} with {group.n_images} images...")
+        if group.n_images == 2:
+            log.warning(f"\tDropping group {group.group_id} with 2 images: {group.first_image} and {group.last_image}")
+            # Get ImageFile object from images with basename = group.last_image
+            for f in files:
+                if f.basename == group.last_image:
+                    f.group_id = None
+                    f.group_type = None
+                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.last_image}")
+                    # set this group.n_images to 0 in groups:
+                    group.n_images = 0
+                    break  # only one file to remove to group => exit loop on files
+        else:
+            # Get ImageFile object from images with basename = group.first_image
+            for f in files:
+                if f.basename == group.first_image:
+                    f.group_id = f"group_{group.group_id}"
+                    f.group_type = "group"
+                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.first_image}")
+                    break  # only one file to remove to group => exit loop on files
+            log.info(f"\tGroup {group.group_id} with {group.n_images} images: {group.first_image} and {group.last_image}")
+
+    log.warning(groups)
+    # Count groups
+    n_groups = len(set(f.group_id for f in files if f.group_type == "group"))
+    log.info(f"Identified {n_groups} panorama groups")
+    return files
+
+
 def identify_image_groups(files):
     """
     Identifies groups of images that form series like panoramas, HDR, or focus bracketing.
@@ -447,36 +481,7 @@ def identify_image_groups(files):
 
     log.warning(groups)
 
-    # Walk through each group in order to:
-    # - drop it if 2 images only
-    # - inform the group in group_id of the first image
-    for group in groups:
-        log.debug(f"Walking through group {group.group_id} with {group.n_images} images...")
-        if group.n_images == 2:
-            log.warning(f"\tDropping group {group.group_id} with 2 images: {group.first_image} and {group.last_image}")
-            # Get ImageFile object from images with basename = group.last_image
-            for f in files:
-                if f.basename == group.last_image:
-                    f.group_id = None
-                    f.group_type = None
-                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.last_image}")
-                    # set this group.n_images to 0 in groups:
-                    group.n_images = 0
-                    break  # only one file to remove to group => exit loop on files
-        else:
-            # Get ImageFile object from images with basename = group.first_image
-            for f in files:
-                if f.basename == group.first_image:
-                    f.group_id = f"group_{group.group_id}"
-                    f.group_type = "group"
-                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.first_image}")
-                    break  # only one file to remove to group => exit loop on files
-            log.info(f"\tGroup {group.group_id} with {group.n_images} images: {group.first_image} and {group.last_image}")
-
-    log.warning(groups)
-    # Count groups
-    n_groups = len(set(f.group_id for f in files if f.group_type == "group"))
-    log.info(f"Identified {n_groups} panorama groups")
+    files = review_and_cleanup_groups(files, groups)
 
     return files
 
@@ -536,11 +541,64 @@ def identify_advanced_image_groups(files):
 def confirm_groups(files):
     """
     Walks through each file of files to check the group_id and for each group_id confirm with the user if this group is:
-    Correct (default),
-    Incorrect (should be completely dropped)
-    or incomplete (begin/end should be edited).
+    - [P]anorama: keep group, generate png, create Hugin script (default)
+    - [C]ancel: images were incorrectly detected as a group
+    - [O]ther: group is correct but not a panorama: keep group, generate png but do not create Hugin script
     """
-    log.fatal("NOT IMPLEMENTED YET")
+
+    new_group_id: int = 0
+    group_id: str | None = "group_000_start_while_loop"
+    while group_id:
+        group_id = None
+        first_picture: str | None = None
+        last_picture: str | None = None
+        serie_of_photos = list()
+        for file in files:
+            if group_id is None and file.group_id and file.group_id.startswith("group_"):
+                log.debug("Starting review of new group_id:")  # Groups not reviewed yet start with "group_"
+                group_id = file.group_id
+                first_picture = file.basename
+                log.info("╔═══════════════════════════════╦───────────┬───────┐")
+                log.info(f"║ {group_id:<30}║ timestamp │exp.(s)│")
+                log.info("╠═════════════════════╤═════════╩═══════════╪═══════╣")
+            if group_id and file.group_id == group_id:
+                last_picture = file.basename
+                serie_of_photos.append(file.basename)
+                log.info(f"║ {file.basename:<20}│ {file.timestamp} │ {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} ║")
+
+        if group_id:
+            log.info("╚═════════════════════╧═════════════════════╧═══════╝")
+
+            sub_folder_name = create_sub_folder_name(serie_of_photos, False)
+            # Ask if this group is confirmed as a Panorama, or Canceled, or something else:
+            log.info(f"What should be done with this group? '{sub_folder_name}' ")
+            log.info("- [P]anorama: keep group, generate png, create Hugin script (default)")
+            log.info("- [C]ancel: images were incorrectly detected as a group")
+            log.info("- [O]ther: group is correct but not a panorama: keep group, generate png but do not create Hugin script")
+            choice = input("\nEnter your choice [P/C/O]:")
+            if choice.lower() == "p" or choice == "":
+                log.info("Group confirmed as Panorama")
+                choice = "panorama"
+            elif choice.lower() == "c":
+                log.info("Group confirmed as Canceled")
+                sub_folder_name = None
+                choice = "canceled"
+            else:
+                log.info("Group confirmed as something else")
+                sub_folder_name = sub_folder_name + "_other"
+                choice = "other"
+
+            for file in files:
+                if file.group_id == group_id:
+                    file.group_id = sub_folder_name
+                    file.group_type = choice
+                    log.debug(f"\tReclassified {file.basename} from {group_id}(group) to {file.group_id} ({file.group_type}).")
+
+        else:
+            log.info("No more groups to validate.")
+
+        # end of while group_id loop
+
     return files
 
 
@@ -823,18 +881,20 @@ def geotag_pictures(photo_folder, file_gpx):
 
 def create_sub_folder_name(serie_of_photos, serie_is_hdr):
     # create sub-folder name:
-    first_picture = serie_of_photos[0][:-4]  # the [:-4] removes the 4 lasts chars (extension)
-    last_picture = serie_of_photos[len(serie_of_photos) - 1][:-4]
+    first_picture = serie_of_photos[0]  # Added [:-4] used to be there to drop the extension
+    last_picture = serie_of_photos[len(serie_of_photos) - 1]
     subfolder_name = first_picture + "-"  # Starts with the name of first picture
-    continue_loop = True
+    continue_loop_char = True
     i = 0
-    while continue_loop:
+    while continue_loop_char:
         if first_picture[i] == last_picture[i]:
             # i-th char of each file is identical
             i = i + 1
+            if i >= len(first_picture) or i >= len(last_picture):
+                continue_loop_char = False  # Why not break?
         else:
             # i-th char of each file is different => exiting the loop
-            continue_loop = False
+            continue_loop_char = False  # Why not break?
     subfolder_name = subfolder_name + last_picture[i:] + "_" + str(len(serie_of_photos))
     if serie_is_hdr:
         subfolder_name = subfolder_name + "_HDR"
