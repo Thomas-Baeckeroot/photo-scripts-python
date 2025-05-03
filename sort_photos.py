@@ -15,6 +15,7 @@ import glob
 import json
 import logging
 import os
+import shutil
 import subprocess
 
 from dataclasses import dataclass, field
@@ -627,6 +628,43 @@ def confirm_groups(files):
     return files
 
 
+def create_folder_for_raws(photo_folder):
+    # Create folder for "RAWS" if not existing already:
+    raw_folder = os.path.join(photo_folder, FOLDER_FOR_RAWS)
+    if os.path.isdir(raw_folder):
+        log.debug(f"│ Folder '{FOLDER_FOR_RAWS}' already exists")
+    else:
+        log.info(f"│ Creating folder '{FOLDER_FOR_RAWS}'...")
+        os.mkdir(raw_folder)
+    return raw_folder
+
+
+def move_raws_to_folder(photo_folder: str, files):  # -> list<ImageFile>
+    """
+    Moves a RAW file associated with an ImageFile to the dedicated RAW subfolder.
+
+    Args:
+        photo_folder (str): The base folder where the images are stored.
+        file (ImageFile): The image metadata containing raw file paths.
+
+    Returns:
+        None
+    """
+    log_title("Move raw files to adequate folder")
+
+    for file in files:
+        if file.raw_filename:
+            source_folder = os.path.join(photo_folder, file.raw_relative_path)
+            destination_folder = create_folder_for_raws(photo_folder)
+            if source_folder != destination_folder:  # os.path.samefile(...)
+                source_file = os.path.join(source_folder, file.raw_filename)
+                destination_file = os.path.join(destination_folder, file.raw_filename)
+                log.debug(f"│\tMoving file '{source_file}'")
+                log.debug(f"│\t         to '{destination_file}' ...")
+                real_dst_ignored = shutil.move(source_file, destination_file)
+                file.raw_relative_path = FOLDER_FOR_RAWS
+
+
 def get_newest_gpx_in_parent(folder):
     list_of_files = glob.glob(folder + '../*.gpx')  # * means all if need specific format then *.csv
     log.debug(list_of_files)
@@ -765,12 +803,7 @@ def move_raws(photo_folder, raw_files, rendered_files, other_files):
     if len(raw_files) == 0:
         log.info("│ No raw file found.")
     else:
-        # Create folder for "RAWS" if not existing already:
-        if os.path.isdir(photo_folder + FOLDER_FOR_RAWS):
-            log.warning(f"│ Folder '{FOLDER_FOR_RAWS}' already exists")
-        else:
-            log.info(f"│ Creating folder '{FOLDER_FOR_RAWS}'...")
-            os.mkdir(photo_folder + FOLDER_FOR_RAWS)
+        create_folder_for_raws(photo_folder)
 
         log.info("│ Moving raw images to their folder...")
         for raw_file in raw_files:
@@ -1072,10 +1105,11 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
 
     files = confirm_groups(files)
 
+    files = move_raws_to_folder(photo_folder, files)
+
     log_title("EXIT")
     log_files(files, photo_folder)
     exit(-100)
-    files = move_raws()
 
     # Older method being deprecated:
     (raw_files, rendered_files, other_files) = get_files(photo_folder)
