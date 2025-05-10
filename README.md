@@ -15,9 +15,9 @@ Idea is to start from files as downloaded from the camera. From DigiKam, I got:
     ├── IMG_0001.RAW
     ├── IMG_0001.JPG
     ├── IMG_0002.RAW
-    ├── IMG_0002.JPG
-    ├── IMG_0003.RAW
-    ├── IMG_0003.JPG
+    ├── IMG_0002.jpeg
+    ├── img_0003.RAW
+    ├── img_0003.avif
     ├── IMG_0011.CR2   ╮ raws alone
     ├── IMG_0012.CR3   ╯ (no associated jpeg or avif)
     ├── IMG_0020.RAW   ╮
@@ -66,8 +66,8 @@ to organise it as:
     │   └── IMG_0024-6_3.pto         ╯
     │   
     ├── IMG_0001.JPG
-    ├── IMG_0002.JPG
-    ├── IMG_0003.JPG
+    ├── IMG_0002.jpeg
+    ├── IMG_0003.avif
     ├── IMG_0011.avif      (new)
     ├── IMG_0012.avif      (new)
     ├── IMG_0020-3_4.avif  (new, far from implemented)
@@ -90,7 +90,7 @@ I'm wondering if the below would be better?
     │   ├── IMG_0003.RAW
     │   ├── IMG_0011.CR2
     │   └── IMG_0012.CR3
-    ├── IMG_0020-3_4/         ╮
+    ├── IMG_0020-3_4/          ╮
     │   ├── RAWs/              |
     │   │   ├── IMG_0020.RAW   | (set of pictures / panorama)
     │   │   ├── IMG_0021.RAW   |
