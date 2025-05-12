@@ -108,29 +108,33 @@ class GroupInfo:
 
 
 def log_files(files, folder):
-    log.info(f"Found {len(files)} files in '{folder}':")
+    if files:
+        log.info(f"Found {len(files)} files in '{folder}':")
+    else:
+        log.warning(f"Did not find any files in '{folder}':")
     log.debug(
         "┌────────────────────────────────────────────┬───────────────────────────────┬───────────────────────────────┬─────────────────────┬───────┬─────┬──────────────┐")
     log.debug(
         "| basename             (original_filename)   | raw                           | processed                     |      timestamp      |exp.(s)| gps | group (type) |")
     previous_group_id = "STARTING"
-    for file in files:
-        if file.group_id != previous_group_id:
+    if files:
+        for file in files:
+            if file.group_id != previous_group_id:
+                log.debug(
+                    "├────────────────────────────────────────────┼───────────────────────────────┼───────────────────────────────┼─────────────────────┼───────┼─────┼──────────────┤")
+                previous_group_id = file.group_id
+            raw_file_with_path = f"{file.raw_relative_path} {file.raw_filename}" if file.raw_filename else "  -"
+            processed_file_with_path = f"{file.processed_relative_path} {file.processed_filename}" if file.processed_filename else "  -"
             log.debug(
-                "├────────────────────────────────────────────┼───────────────────────────────┼───────────────────────────────┼─────────────────────┼───────┼─────┼──────────────┤")
-            previous_group_id = file.group_id
-        raw_file_with_path = f"{file.raw_relative_path} {file.raw_filename}" if file.raw_filename else "  -"
-        processed_file_with_path = f"{file.processed_relative_path} {file.processed_filename}" if file.processed_filename else "  -"
-        log.debug(
-            f"| {file.basename:<20} ({file.original_filename:<20})"
-            f"| {raw_file_with_path:<30}"
-            f"| {processed_file_with_path:<30}"
-            f"| {f'{file.timestamp}' if file.timestamp is not None else '---- -- -- --:--:--'} "
-            f"| {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} "
-            f"| {'yes' if file.has_gps else 'no '} "
-            f"| {file.group_id or '-'} ({file.group_type or '-'}) "
-            # f"|"  # todo Adjust last column width
-        )
+                f"| {file.basename:<20} ({file.original_filename:<20})"
+                f"| {raw_file_with_path:<30}"
+                f"| {processed_file_with_path:<30}"
+                f"| {f'{file.timestamp}' if file.timestamp is not None else '---- -- -- --:--:--'} "
+                f"| {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} "
+                f"| {'yes' if file.has_gps else 'no '} "
+                f"| {file.group_id or '-'} ({file.group_type or '-'}) "
+                # f"|"  # todo Adjust last column width
+            )
     log.debug(
         "└────────────────────────────────────────────┴───────────────────────────────┴───────────────────────────────┴─────────────────────┴───────┴─────┴──────────────┘")
 
@@ -163,23 +167,18 @@ def scan_directory(root_directory):
 
             # Calculate the relative path from the root directory
             rel_path = os.path.relpath(dirpath, root_directory)
-            if rel_path == ".":  # If it's the root directory
-                rel_path = ""
-            rel_path = "/" + rel_path + "/" if rel_path else "/"
+            # (no more need to add '/')
 
             # Determine if it's a RAW or processed image
             if ext.lower() in RAW_EXTENSIONS:
-                raw_relative_path = rel_path
                 raw_filename = filename
                 processed_relative_path = None
                 processed_filename = None
             elif ext.lower() in RENDERED_EXTENSIONS:
-                raw_relative_path = None
                 raw_filename = None
                 processed_relative_path = rel_path
                 processed_filename = filename
             else:
-                raw_relative_path = None
                 raw_filename = None
                 processed_relative_path = None
                 processed_filename = None
@@ -215,7 +214,11 @@ def get_exif_with_exiftool(filepath):
         exif_data = json.loads(result.stdout)[0]
         return exif_data
     except Exception as e:
-        log.warning(f"Could not extract EXIF using exiftool for {filepath}: {e}")
+        log.error("")
+        log.error(f"Could not extract EXIF using exiftool for {filepath}: {e}")
+        log.error("If failing as 'No such file or directory: 'exiftool'' ")
+        log.error("then install exiftool: see https://exiftool.org/install.html (or install with brew, apt, etc...)")
+        log.error("")
         return {}
 
 
@@ -502,7 +505,7 @@ def identify_image_groups(files):
         last_timestamp = file.timestamp
         previous_image_basename = file.basename
 
-    log.warning(groups)
+    log.info(f"Found {len(groups)} groups: {groups}")
 
     files = review_and_cleanup_groups(files, groups)
 
@@ -578,27 +581,27 @@ def confirm_groups(files):
         serie_of_photos = list()
         for file in files:
             if group_id is None and file.group_id and file.group_id.startswith("group_"):
-                log.debug("Starting review of new group_id:")  # Groups not reviewed yet start with "group_"
+                print("Starting review of new group_id:")  # Groups not reviewed yet start with "group_"
                 group_id = file.group_id
                 first_picture = file.basename
-                log.info("╔═══════════════════════════════╦───────────┬───────┐")
-                log.info(f"║ {group_id:<30}║ timestamp │exp.(s)│")
-                log.info("╠═════════════════════╤═════════╩═══════════╪═══════╣")
+                print("╔═══════════════════════════════╦───────────┬───────┐")
+                print(f"║ {group_id:<30}║ timestamp │exp.(s)│")
+                print("╠═════════════════════╤═════════╩═══════════╪═══════╣")
             if group_id and file.group_id == group_id:
                 last_picture = file.basename
                 serie_of_photos.append(file.basename)
-                log.info(
+                print(
                     f"║ {file.basename:<20}│ {file.timestamp} │ {f'{file.exposure_time:.3f}' if file.exposure_time is not None else '-.---'} ║")
 
         if group_id:
-            log.info("╚═════════════════════╧═════════════════════╧═══════╝")
+            print("╚═════════════════════╧═════════════════════╧═══════╝")
 
             sub_folder_name = create_sub_folder_name(serie_of_photos, False)
             # Ask if this group is confirmed as a Panorama, or Canceled, or something else:
-            log.info(f"What should be done with this group? '{sub_folder_name}' ")
-            log.info("- [P]anorama: keep group, generate png, create Hugin script (default)")
-            log.info("- [C]ancel: images were incorrectly detected as a group")
-            log.info("- [O]ther: group is correct but not a panorama:"
+            print(f"What should be done with this group? '{sub_folder_name}' ")
+            print("- [P]anorama: keep group, generate png, create Hugin script (default)")
+            print("- [C]ancel: images were incorrectly detected as a group")
+            print("- [O]ther: group is correct but not a panorama:"
                      " keep group, generate png but do not create Hugin script")
             choice = input("\nEnter your choice [P/C/O]:")
             if choice.lower() == "p" or choice == "":
@@ -645,7 +648,7 @@ def move_raws_to_folder(photo_folder: str, files):  # -> list<ImageFile>
 
     Args:
         photo_folder (str): The base folder where the images are stored.
-        file (ImageFile): The image metadata containing raw file paths.
+        files (list of ImageFile): The images metadata (that contains raw file paths).
 
     Returns:
         None
@@ -1084,9 +1087,6 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     :param gpx_file: GPS tracker file to geo-localize picture (if not already)
     :return: exit code 0 if no errors
     """
-    # Normalise photoFolder (append with '/' if not already present at the end):
-    if photo_folder[len(photo_folder) - 1] != '/':
-        photo_folder = photo_folder + '/'
 
     files = scan_directory(photo_folder)
     log.info(f"Found {len(files)} files in {photo_folder}")
