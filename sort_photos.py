@@ -18,7 +18,7 @@ import os
 import shutil
 import subprocess
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass  # Not used yet: field
 from datetime import datetime
 from PIL import Image  # If PIL module not installed, then: `pip install Pillow`
 # soon pillow-avif-plugin will also be required
@@ -29,9 +29,9 @@ from typing import Optional
 # CONSTANTS:
 ERROR = '\033[1;31mError:\033[0m '
 # Return codes:
-#   0    Normal exit
-#  -1    Invalid number of arguments
-#  -2    Folder given as picture folder is not detected as a valid folder
+#   0 Normal exit
+#  -1 Invalid number of arguments
+#  -2 Folder given as picture folder is not detected as a valid folder
 RC_ATTRIBUTES_ERROR = -1
 RC_PATH_ERROR = -2
 
@@ -390,17 +390,18 @@ def review_and_cleanup_groups(files, groups):
     # - drop it if 2 images only
     # - inform the group in group_id of the first image
     for group in groups:
-        log.debug(f"Walking through group {group.group_id} with {group.n_images} images...")
+        log.debug(f"Walking through group '{group.group_id}' with {group.n_images} images...")
         if group.n_images == 2:
-            log.warning(f"\tDropping group {group.group_id} with 2 images: {group.first_image} and {group.last_image}")
-            # Get ImageFile object from images with basename = group.last_image
+            log.warning(f"\tDropping group '{group.group_id}' with 2 images: '{group.first_image}' and '{group.last_image}'")
+            # set this group.n_images to 0 in groups:
+            group.n_images = 0
             for f in files:
-                if f.basename == group.last_image:
+                # Remove group_id for each image of this group:
+                if f.group_id == f"group_{group.group_id}":
+                    # if f.basename == group.last_image:
                     f.group_id = None
                     f.group_type = None
-                    log.debug(f"\tReassigned group_id '{f.group_id}' to {group.last_image}")
-                    # set this group.n_images to 0 in groups:
-                    group.n_images = 0
+                    log.debug(f"\tDropped group_id '{f.group_id}' for '{f.original_filename}'")
                     break  # only one file to remove to group => exit loop on files
         else:
             # Get ImageFile object from images with basename = group.first_image
@@ -445,7 +446,6 @@ def identify_image_groups(files):
     log.info(f"Analyzing {len(files)} files with timestamps for series identification")
 
     groups = []
-    current_group = None
     previous_image_part_of_group: bool = False
     current_group_id = 0
     last_timestamp = datetime(1970, 1, 1)
@@ -456,28 +456,33 @@ def identify_image_groups(files):
     # Differentiation between HDR, bracketing focus and other will be made differently later.
 
     for file in files:
-        log.debug(f"Verifying if {file.basename} is part of a group...")
+        log.debug(f"Verifying if {file.original_filename} is part of a group...")
         # Skip if no timestamp
         if not file.timestamp:
-            continue
+            log.debug(" └→ no timestamp => ignore file (skip)")
+            continue  # back to the next element of loop "for file in files..."
 
         if last_timestamp is None:
-            # First file with timestamp
+            log.debug(" └→ Previous image file had no timestamp defines => this image can be the first of a series...")
             last_timestamp = file.timestamp
-            continue
+            continue  # back to the next element of loop "for file in files..."
 
         # Calculate time difference from the previous shot (time between to shots, not including exposure time that can be seconds for nightly panoramas)
         time_diff = (file.timestamp - last_timestamp).total_seconds() - file.exposure_time
 
-        # Determine if this is part of a series
-        if time_diff <= MIN_TIME_BETWEEN_PANOS:
-            # Shots within panorama time range
+        # Determine if this is part of a set
+        if MIN_TIME_BETWEEN_PANOS >= time_diff >= 0:
+            # note: if time_diff is negative, it is mostly because picture number looped
+            # (from IMG_9999 back to IMG_0000)
+            # if time_diff too big, then not a group/pano
+            # Entering here only if possible group/pano.
+            log.debug(" │\tShot within panorama time range")
             if not previous_image_part_of_group:
                 # Start a new group
                 current_group_id += 1
                 if previous_image_basename is None:
                     previous_image_basename = "ERROR"
-                    log.error(f"\t\tNo previous image basename for group {current_group_id}! (this should not happen)")
+                    log.error(f" │\t\tNo previous image basename for group {current_group_id}! (this should not happen)")
                 group_obj = GroupInfo(
                     group_id=current_group_id,
                     first_image=previous_image_basename,
@@ -486,19 +491,20 @@ def identify_image_groups(files):
                 )
                 groups.append(group_obj)
                 previous_image_part_of_group = True
-                log.debug(f"\t\tStarting new group {current_group_id} with "
-                          f"first shot {previous_image_basename} and last shot {file.basename} (for now)")
+                log.debug(f" │\t\tStarting new group '{current_group_id}' with "
+                          f"first shot '{previous_image_basename}' and last shot '{file.basename}' (for now)")
             else:
-                # update last_image and increment n_images in current group (last one added to groups):
+                # update last_image and increment n_images in the current group (last one added to groups):
                 groups[-1].last_image = file.basename
                 groups[-1].n_images += 1
 
             file.group_id = f"group_{current_group_id}"
             file.group_type = "group"
-            log.debug(f"\tAdded {file.basename} to group {current_group_id}")
+            log.debug(f" └→ Added {file.basename} to group {current_group_id}")
 
         else:
-            # This shot doesn't belong to a series
+            log.debug(" │\tThis shot doesn't belong to a series with previous image")
+            log.debug(" └→ (starting new group)")
             previous_image_part_of_group = False
 
         # Update last timestamp
@@ -658,6 +664,7 @@ def move_raws_to_folder(photo_folder: str, files):  # -> list<ImageFile>
     for file in files:
         if file.raw_filename:
             source_folder = os.path.join(photo_folder, file.raw_relative_path)
+            log.debug(f"source_folder = '{source_folder}'")
             destination_folder = create_folder_for_raws(photo_folder)
             if source_folder != destination_folder:  # os.path.samefile(...)
                 source_file = os.path.join(source_folder, file.raw_filename)
