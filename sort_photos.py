@@ -675,6 +675,7 @@ def move_raws_to_folder(photo_folder: str, files):  # -> list<ImageFile>
                 log.debug(f"│\t         to '{destination_file}' ...")
                 real_dst_ignored = shutil.move(source_file, destination_file)
                 file.raw_relative_path = FOLDER_FOR_RAWS
+    return files
 
 
 def get_newest_gpx_in_parent(folder):
@@ -842,12 +843,117 @@ def create_processed_images(photo_folder, files):
     for file_entry in files:
         if file_entry.raw_filename and not file_entry.processed_filename:
             if file_entry.group_id:
-                log.debug(f" └→ Create png from '{file_entry.raw_filename}' for group '{file_entry.group_id}'")
-                # TODO Implement creation of png image
+                log.debug(f" ├→ Create png from '{file_entry.raw_filename}' for group '{file_entry.group_id}'")
+                file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry)
             else:  # no group_id for current file_entry
-                log.debug(f" └→ Create avif from '{file_entry.raw_filename}' for individual image")
+                log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' for individual image")
                 # TODO Implement creation of avif in main folder
     return files
+
+
+def create_tiff_16bit_from_raw(photo_folder, file_entry):
+    """
+    Create a 16-bit ITFF image from a RAW file for panorama processing.
+    Uses dcraw to extract the RAW data.
+    
+    Args:
+        photo_folder (str): Base photo folder path
+        file_entry (ImageFile): file entry containing required info (input file name, group, ...)
+    """
+    log.debug(f" ┊   └→ Creating 16-bit TIFF from RAW file '{file_entry.raw_filename}'")
+
+    # Construct full path to RAW file (assuming it's in the RAW subfolder)
+    raw_file_path = os.path.join(photo_folder, file_entry.raw_relative_path, file_entry.raw_filename)
+
+    # Extract basename without extension for output filename
+    basename = os.path.splitext(file_entry.raw_filename)[0]
+
+    # Create group folder if it doesn't exist
+    group_folder = os.path.join(photo_folder, file_entry.group_id)
+    if not os.path.exists(group_folder):
+        os.makedirs(group_folder)
+        log.debug(f" ┊      Created group folder: {group_folder}")
+
+    # Output PNG filename
+    png_filename = f"{basename}.png"
+    png_output_path = os.path.join(group_folder, png_filename)
+
+    try:
+        # Use dcraw to extract 16-bit TIFF data from RAW file
+        # -T: output TIFF format
+        # -4: 16-bit linear output
+        # -o 0: output colorspace sRGB
+        # -q 3: high quality interpolation
+        # -w: use camera white balance
+
+        # dcraw_cmd = [
+        #     'dcraw',
+        #     '-T',           # Output TIFF format
+        #     '-4',           # 16-bit linear output
+        #     '-o', '0',      # sRGB output colorspace
+        #     '-q', '3',      # High quality interpolation
+        #     '-w',           # Use camera white balance
+        #     '-c',           # Write to stdout
+        #     raw_file_path
+        # ]
+        # Given that upper caused issues with Canon CR3 images, we prefer the below:
+        dcraw_cmd = [
+            'dcraw_emu',  # Using libraw directly
+            # '-v',           # verbose
+            '-T',  # Output TIFF format (keep metadata, etc...)
+            '-6',  # 16-bit linear output
+            # '-o', '1',      # sRGB D65 (default)
+            '-o', '4',  # Kodak ProPhoto RGB D65 (for max gamut and compatibility)
+            '-o', '3',  # Wide Gamut RGB D65 (fall-back if upper fails)
+            '-q', '3',  # High quality interpolation
+            '-w',  # Use camera white balance
+            # '-H', '2',      # Maybe the best in 8 bits but loses details in highlights in 16 bits
+            '-H', '1',  # Keep as much information as possible (highlights managed after merging)
+            '-fbdd', '1',  # noise reduction (?)
+            raw_file_path
+        ]
+
+        log.debug(f" ┊      Running dcraw command: {' '.join(dcraw_cmd)}")
+        # Execute dcraw and capture output
+        with open(f"/tmp/dcraw_{file_entry.basename}.log", 'wb') as temp_file:
+            result = subprocess.run(dcraw_cmd, stdout=temp_file, stderr=subprocess.PIPE, check=True)
+            log.debug(f" ┊      dcraw command result: {result}")
+        log.debug(f" ┊      dcraw command output: see file '{temp_file}'")
+
+        expected_tiff_out = raw_file_path + ".tiff"
+        shutil.move(
+            expected_tiff_out,
+            os.path.join(group_folder, f"{basename}.tiff")
+        )
+
+    except subprocess.CalledProcessError as e:
+        log.error(f" ┊    → dcraw failed for {file_entry.raw_filename}: {e.stderr.decode()}")
+        log.error(" ┊")
+        log.error(" ┊      STRONGLY ADVISE TO INSTALL dcraw !")
+        log.error(" ┊        MacOS: `brew install dcraw`")
+        log.error(" ┊        Linux: `sudo apt install dcraw` (Ubuntu), ...")
+        log.error(" ┊        ...")
+        log.error(" ┊")
+        # Fallback: try using PIL directly (may not be 16-bit)
+        try:
+            with Image.open(raw_file_path) as img:
+                img.save(png_output_path, 'PNG')
+                log.warning(f" ┊    → Created PNG using PIL fallback (may not be 16-bit): {png_output_path}")
+        except Exception as pil_error:
+            log.error(f" ┊    → Both dcraw and PIL failed for {file_entry.raw_filename}: {pil_error}")
+
+    except FileNotFoundError:
+        log.error(f" ┊    → dcraw not found. Please install dcraw for RAW processing.")
+        # Fallback to PIL
+        try:
+            with Image.open(raw_file_path) as img:
+                img.save(png_output_path, 'PNG')
+                log.warning(f" ┊    → Created PNG using PIL fallback (may not be 16-bit): {png_output_path}")
+        except Exception as pil_error:
+            log.error(f" ┊    → PIL fallback also failed for {file_entry.raw_filename}: {pil_error}")
+
+    except Exception as e:
+        log.error(f"Unexpected error processing {file_entry.raw_filename}: {e}")
 
 
 def geotag_move_backups(photo_folder):
@@ -1128,6 +1234,9 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     files = confirm_groups(files)
 
     files = move_raws_to_folder(photo_folder, files)
+    log_files(files, photo_folder)
+
+    files = create_processed_images(photo_folder, files)
 
     log_title("EXIT")
     log_files(files, photo_folder)
