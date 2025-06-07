@@ -392,7 +392,8 @@ def review_and_cleanup_groups(files, groups):
     for group in groups:
         log.debug(f"Walking through group '{group.group_id}' with {group.n_images} images...")
         if group.n_images == 2:
-            log.warning(f"\tDropping group '{group.group_id}' with 2 images: '{group.first_image}' and '{group.last_image}'")
+            log.warning(f"\tDropping group '{group.group_id}' "
+                        f"with 2 images: '{group.first_image}' and '{group.last_image}'")
             # set this group.n_images to 0 in groups:
             group.n_images = 0
             for f in files:
@@ -482,7 +483,8 @@ def identify_image_groups(files):
                 current_group_id += 1
                 if previous_image_basename is None:
                     previous_image_basename = "ERROR"
-                    log.error(f" │\t\tNo previous image basename for group {current_group_id}! (this should not happen)")
+                    log.error(
+                        f" │\t\tNo previous image basename for group {current_group_id}! (this should not happen)")
                 group_obj = GroupInfo(
                     group_id=current_group_id,
                     first_image=previous_image_basename,
@@ -608,7 +610,7 @@ def confirm_groups(files):
             print("- [P]anorama: keep group, generate png, create Hugin script (default)")
             print("- [C]ancel: images were incorrectly detected as a group")
             print("- [O]ther: group is correct but not a panorama:"
-                     " keep group, generate png but do not create Hugin script")
+                  " keep group, generate png but do not create Hugin script")
             choice = input("\nEnter your choice [P/C/O]:")
             if choice.lower() == "p" or choice == "":
                 log.info("Group confirmed as Panorama")
@@ -833,6 +835,19 @@ def move_raws(photo_folder, raw_files, rendered_files, other_files):
                     pass
             if not found_rendered_file:
                 create_avif_for_raw(photo_folder, raw_file)
+
+
+def create_processed_images(photo_folder, files):
+    log.debug("START .create_processed_images()")
+    for file_entry in files:
+        if file_entry.raw_filename and not file_entry.processed_filename:
+            if file_entry.group_id:
+                log.debug(f" └→ Create png from '{file_entry.raw_filename}' for group '{file_entry.group_id}'")
+                # TODO Implement creation of png image
+            else:  # no group_id for current file_entry
+                log.debug(f" └→ Create avif from '{file_entry.raw_filename}' for individual image")
+                # TODO Implement creation of avif in main folder
+    return files
 
 
 def geotag_move_backups(photo_folder):
