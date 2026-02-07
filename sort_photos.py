@@ -123,8 +123,8 @@ def log_files(files, folder):
                 log.debug(
                     "├────────────────────────────────────────────┼───────────────────────────────┼───────────────────────────────┼─────────────────────┼───────┼─────┼──────────────┤")
                 previous_group_id = file.group_id
-            raw_file_with_path = f"{file.raw_relative_path} {file.raw_filename}" if file.raw_filename else "  -"
-            processed_file_with_path = f"{file.processed_relative_path} {file.processed_filename}" if file.processed_filename else "  -"
+            raw_file_with_path = f"'{file.raw_relative_path}'/'{file.raw_filename}'" if file.raw_filename else "  -"
+            processed_file_with_path = f"'{file.processed_relative_path}'/'{file.processed_filename}'" if file.processed_filename else "  -"
             log.debug(
                 f"| {file.basename:<20} ({file.original_filename:<20})"
                 f"| {raw_file_with_path:<30}"
@@ -167,7 +167,9 @@ def scan_directory(root_directory):
 
             # Calculate the relative path from the root directory
             rel_path = os.path.relpath(dirpath, root_directory)
-            # (no more need to add '/')
+            if rel_path == ".":  # If it's the root directory
+                rel_path = ""
+            rel_path = rel_path if rel_path else ""
 
             # Determine if it's a RAW or processed image
             if ext.lower() in RAW_EXTENSIONS:
@@ -855,7 +857,7 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry):
     """
     Create a 16-bit ITFF image from a RAW file for panorama processing.
     Uses dcraw to extract the RAW data.
-    
+
     Args:
         photo_folder (str): Base photo folder path
         file_entry (ImageFile): file entry containing required info (input file name, group, ...)
@@ -1224,6 +1226,8 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     files = extract_image_metadata(photo_folder, files)
     log_files(files, photo_folder)
 
+    # TODO Add here geo-tagging of pictures
+
     # Consolidate files with the same basename:
     files = consolidate_images(files)
     log_files(files, photo_folder)
@@ -1232,6 +1236,8 @@ def sort_photos(photo_folder: str, gpx_file: str) -> None:
     files = identify_advanced_image_groups(files)
 
     files = confirm_groups(files)
+
+    # files = create_processed_images(files)
 
     files = move_raws_to_folder(photo_folder, files)
     log_files(files, photo_folder)
