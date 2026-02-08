@@ -1149,7 +1149,7 @@ def get_time_shift():
 
 def geotag_pictures(photo_folder: str, file_gpx: str, files: List = None):
     """
-    Geotag photos using a GPX track file.
+    Geotag photos using a GPX track file via exiftool.
 
     Args:
         photo_folder: Directory containing photos to geotag
@@ -1158,7 +1158,7 @@ def geotag_pictures(photo_folder: str, file_gpx: str, files: List = None):
 
     TODO: Skip photos that already have GPS data (use files[].has_gps to filter)
     """
-    log_title("geo-tagging jpegs pictures")
+    log_title("geo-tagging pictures with exiftool")
 
     if file_gpx and file_gpx != '':
         # Command line argument has priority
@@ -1184,69 +1184,39 @@ def geotag_pictures(photo_folder: str, file_gpx: str, files: List = None):
     if file_gpx_with_folder:  # variable defined (not None)
 
         offset = get_time_shift()
-        # gpysync_cmd = "python ~/Applications/GPicSync/src/gpicsync.py" \
-        #              + " --directory='" + photo_folder \
-        #              + "' --gpx='" + file_gpx_with_folder \
-        #              + "' --offset=" + offset \
-        #              + " --time-range=3000"
-        # subprocess.call(
-        #     gpysync_cmd,
-        #     shell=True)
-        log.info("│ Launching GPicSync...")
-        child = subprocess.Popen(
-            ["python", "/home/thomas/Applications/GPicSync/src/gpicsync.py",
-             "--directory=" + photo_folder,
-             "--gpx=" + file_gpx_with_folder,
-             "--offset=" + offset,
-             "--time-range=3000"]
-            # , stdout=subprocess.PIPE
-        )
-        streamdata = child.communicate()[0]  # Unused value but required to wait for end of process ?
-        log.debug("│ Waiting for Return Code from GPicSync...")
-        rc = child.returncode
-        # log.debug("GPicSync stdout:")  # .format(str(streamdata)))
-        # print(streamdata)
-        if rc == 0:
-            log.info(f"│ GPicSync -> return code = {rc}")
-        else:
-            log.warning(f"│ {ERROR}GPicSync -> return code = {rc}")
+        # Convert offset format: "+1" -> "+1:00" for exiftool
+        if ':' not in offset:
+            offset = offset + ":00"
 
-        # According to
-        # http://stackoverflow.com/questions/3781851/run-a-python-script-from-another-python-script-passing-in-args
-        # it would be better to use the __main__ from gpicsync.py
-        # => Tentative below, but unsure about GPicSync implementation...
+        log.info(f"│ Launching exiftool geotag with GPX '{file_gpx_with_folder}'...")
+        log.info(f"│ Timezone offset: {offset}")
 
-        # options_dir = photo_folder  # --directory
-        # options_gpx = [file_gpx_with_folder]  # --gpx
-        # options_offset = offset  # --offset=
-        # options_timerange = 3000  # --time-range
-        #
-        # options_qr_time_image = None
-        #
-        # log.debug("Launching GPicSync with GPX file '{0}'".format(options_gpx))
-        # geo = gpicsync.GpicSync(gpxFile=options_gpx,
-        #                         # tcam_l=options_tcam,
-        #                         # tgps_l=options_tgps,
-        #                         UTCoffset=float(options_offset),
-        #                         timerange=int(options_timerange),
-        #                         # timezone=options_timezone,
-        #                         qr_time_image=options_qr_time_image)
-        #
-        # log.debug("Launching GPicSync with FileList from '{0}'".format(options_dir))
-        # files = list(gpicsync.getFileList(options_dir))
-        #
-        # if options_qr_time_image is not None:
-        #     qr_time_images = [(options_qr_time_image, options_qr_time_image)]
-        #     if options_qr_time_image == 'auto':
-        #         qr_time_images = files
-        #     geo.parseQrTime(qr_time_images)
-        #
-        # for fileName, filePath in files:
-        #     print("\nFound fileName ", fileName, " Processing now ...")
-        #     geo.syncPicture(filePath)[0]
+        # exiftool -geotag creates _original backup files (handled by geotag_move_backups)
+        cmd = [
+            "exiftool",
+            "-v",  # enables verbose mode to show progress for each file
+            "-geotag", file_gpx_with_folder,
+            "-geosync=" + offset,
+            photo_folder
+        ]
+        log.debug(f"│ Command: {' '.join(cmd)}")
+
+        try:
+            # Don't capture output to show progress in real-time
+            result = subprocess.run(cmd)
+
+            if result.returncode == 0:
+                log.info(f"│ exiftool -> success")
+            else:
+                log.warning(f"│ {ERROR}exiftool -> return code = {result.returncode}")
+
+        except FileNotFoundError:
+            log.error(f"│ {ERROR}exiftool not found. Please install exiftool.")
+            log.error("│   Ubuntu/Debian: sudo apt install libimage-exiftool-perl")
+            log.error("│   macOS: brew install exiftool")
 
     else:  # from "if file_gpx_with_folder" => file_gpx_with_folder is None
-        log.info("│ No GPX file usable => GPicSync not launched.")
+        log.info("│ No GPX file usable => geotagging skipped.")
 
     geotag_move_backups(photo_folder)
 
