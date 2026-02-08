@@ -1116,26 +1116,27 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry):
 
 def geotag_move_backups(photo_folder):
     # sleep(5)  # Wait a bit for files to be effectively written (if not waiting, files *_original are not moved)
-    # Si des sauvegardes (backup) des photos ont été crées, on les déplace vers un nouveau dossier
-    backup_files = glob.glob(photo_folder + '*_original')  # get backup files within the directory
+    # If backup of photos have been created, we move those to a new folder
+    backup_files = glob.glob(os.path.join(photo_folder, '*_original'))  # get backup files within the directory
     log.info(f"│ Found Backup files by geo-tag: {backup_files}")
     while len(backup_files) > 0:
         log.info(f"│ Backup files by geo-tag: {backup_files}")
-        # Create 'Backups' folder is not existing yet:
-        if os.path.isdir(photo_folder + FOLDER_BACKUP_GPS):
+        # Create 'Backups' folder if not existing yet:
+        backup_folder = os.path.join(photo_folder, FOLDER_BACKUP_GPS)
+        if os.path.isdir(backup_folder):
             log.info(f"│ Folder '{FOLDER_BACKUP_GPS}' for backup pictures already exists.")
         else:
             log.info(f"│ Create folder '{FOLDER_BACKUP_GPS}' for backup pictures...")
-            os.mkdir(photo_folder + FOLDER_BACKUP_GPS)
+            os.mkdir(backup_folder)
 
         log.info("│ Moving original files (before modifying with geo-tag):")
         for backup_file in backup_files:
             log.info(f"│ \tMoving '{backup_file}'...")
-            # try:
-            os.rename(backup_file, backup_file.replace(photo_folder, photo_folder + FOLDER_BACKUP_GPS + "/"))
+            dest_file = os.path.join(backup_folder, os.path.basename(backup_file))
+            os.rename(backup_file, dest_file)
         # Due to some files being missed sometime, we're getting again list of original files that may have been missed
         # in first call (just over 'while'):
-        backup_files = glob.glob(photo_folder + '*_original')  # get backup files within the directory
+        backup_files = glob.glob(os.path.join(photo_folder, '*_original'))  # get backup files within the directory
 
 
 def get_time_shift():
@@ -1194,7 +1195,7 @@ def geotag_pictures(photo_folder: str, file_gpx: str, files: List = None):
         # exiftool -geotag creates _original backup files (handled by geotag_move_backups)
         cmd = [
             "exiftool",
-            "-v",  # enables verbose mode to show progress for each file
+            "-v1",  # enables verbose mode to show progress for each file
             "-geotag", file_gpx_with_folder,
             "-geosync=" + offset,
             photo_folder
