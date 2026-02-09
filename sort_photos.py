@@ -1005,7 +1005,7 @@ def create_processed_images(photo_folder, files):
                 file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry)
             else:  # no group_id for current file_entry
                 log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' for individual image")
-                # TODO Implement creation of avif in main folder
+                create_avif_from_raw_file(photo_folder, file_entry)
     return files
 
 
@@ -1062,7 +1062,7 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry):
             '-6',  # 16-bit linear output
             # '-o', '1',      # sRGB D65 (default)
             '-o', '4',  # Kodak ProPhoto RGB D65 (for max gamut and compatibility)
-            '-o', '3',  # Wide Gamut RGB D65 (fall-back if upper fails)
+            # '-o', '3',  # Wide Gamut RGB D65 (fall-back if upper fails)
             '-q', '3',  # High quality interpolation
             '-w',  # Use camera white balance
             # '-H', '2',      # Maybe the best in 8 bits but loses details in highlights in 16 bits
@@ -1112,6 +1112,108 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry):
 
     except Exception as e:
         log.error(f"Unexpected error processing {file_entry.raw_filename}: {e}")
+
+
+def create_avif_from_raw_file(photo_folder, file_entry):
+    """
+    Create an AVIF image from a RAW file for individual images (not in groups).
+    Uses dcraw to extract the RAW data and PIL to save as AVIF.
+    
+    Args:
+        photo_folder (str): Base photo folder path
+        file_entry (ImageFile): file entry containing required info (input file name, paths, ...)
+    """
+    log.debug(f" ┊   └→ Creating AVIF from RAW file '{file_entry.raw_filename}'")
+
+    # Construct full path to RAW file 
+    raw_file_path = os.path.join(photo_folder, file_entry.raw_relative_path, file_entry.raw_filename)
+
+    # Extract basename without extension for output filename
+    basename = os.path.splitext(file_entry.raw_filename)[0]
+
+    # Output AVIF filename in main folder
+    avif_filename = f"{basename}.avif"
+    avif_output_path = os.path.join(photo_folder, avif_filename)
+
+    try:
+        # First try using dcraw to extract high-quality 8-bit image for AVIF
+        # Use different parameters for AVIF (optimized for web/viewing)
+        dcraw_cmd = [
+            'dcraw_emu',  # Using libraw directly
+            # '-v',           # verbose
+            '-T',  # Output TIFF format (keep metadata, etc...)
+            #'-o', '4',  # Kodak ProPhoto RGB D65 (for max gamut and compatibility)
+            #'-q', '3',  # High quality interpolation
+            '-w',  # Use camera white balance
+            '-H', '9',
+            #'-H', '2',      # Maybe the best in 8 bits but loses details in highlights in 16 bits
+            # '-H', '1',  # Highlight mode: clip highlights
+            #'-q', '3',  # High quality interpolation
+            #'-o', '1',  # sRGB output colorspace
+            #'-fbdd', '1',  # Noise reduction
+            raw_file_path
+        ]
+        expected_tiff_out = raw_file_path + ".tiff"
+        log.debug(f"expexted output to {expected_tiff_out}")
+
+        log.debug(f" ┊      Running dcraw command: {' '.join(dcraw_cmd)}")
+
+        # Execute dcraw and capture PPM output
+        result = subprocess.run(dcraw_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        # Convert PPM data to PIL Image
+        from io import BytesIO
+        ppm_data = BytesIO(result.stdout)
+
+        with Image.open(ppm_data) as img:
+            # Save as AVIF with good quality settings
+            img.save(avif_output_path, 'AVIF', quality=80, speed=6)
+            # Values for speed: default = 6
+            log.info(f"│ Created AVIF: {avif_output_path}")
+
+        # Update file_entry to reflect the new processed image
+        file_entry.processed_relative_path = "."
+        file_entry.processed_filename = avif_filename
+
+    except subprocess.CalledProcessError as e:
+        log.error(f" ┊    → dcraw failed for {file_entry.raw_filename}: {e.stderr.decode()}")
+        log.error(" ┊      Trying PIL fallback...")
+
+        # Fallback: try using PIL directly (may not be optimal quality)
+        try:
+            with Image.open(raw_file_path) as img:
+                # Save AVIF
+                img.save(avif_output_path, 'AVIF', quality=80)
+                log.warning(f" ┊    → Created AVIF using PIL fallback: {avif_output_path}")
+
+                # Update file_entry
+                file_entry.processed_relative_path = "."
+                file_entry.processed_filename = avif_filename
+
+        except Exception as pil_error:
+            log.error(f" ┊    → Both dcraw and PIL failed for {file_entry.raw_filename}: {pil_error}")
+
+    except FileNotFoundError:
+        log.error(f" ┊    → dcraw not found. Trying PIL fallback...")
+
+        # Fallback to PIL
+        try:
+            with Image.open(raw_file_path) as img:
+                # Save AVIF
+                img.save(avif_output_path, 'AVIF', quality=80)
+                log.warning(f" ┊    → Created AVIF using PIL fallback: {avif_output_path}")
+
+                # Update file_entry
+                file_entry.processed_relative_path = "."
+                file_entry.processed_filename = avif_filename
+
+        except Exception as pil_error:
+            log.error(f" ┊    → PIL fallback also failed for {file_entry.raw_filename}: {pil_error}")
+
+    except Exception as e:
+        log.error(f"Unexpected error processing {file_entry.raw_filename}: {e}")
+
+    return file_entry
 
 
 def geotag_move_backups(photo_folder):
