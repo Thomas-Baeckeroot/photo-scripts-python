@@ -1,0 +1,3 @@
+Pillow>=11.0         # Image manipulation (AVIF/TIFF/JPEG read/write)
+rawpy>=0.22          # Python binding for libraw (RAW demosaicing engine)
+numpy>=1.26          # Array manipulation (rawpy output → PIL conversion)
