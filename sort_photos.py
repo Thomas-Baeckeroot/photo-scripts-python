@@ -26,6 +26,7 @@ from sys import argv
 from typing import Optional, List, Tuple
 import numpy as np
 import rawpy                        # Python binding for libraw (same engine as dcraw_emu)
+import tifffile                     # 16-bit TIFF read/write (Pillow can't handle RGB 16-bit)
 import xml.etree.ElementTree as ET
 
 # CONSTANTS:
@@ -1104,13 +1105,13 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
         log.debug(f" ┊      Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
 
-        # Convert numpy array to PIL Image and save
-        img = Image.fromarray(rgb)
-
         if output_format == "avif":
+            # 8-bit RGB → Pillow handles this fine
+            img = Image.fromarray(rgb)
             img.save(output_path, 'AVIF', quality=80, speed=6)
         elif output_format == "tiff":
-            img.save(output_path, 'TIFF', compression='none')
+            # 16-bit RGB → Pillow cannot save uint16 RGB, use tifffile instead
+            tifffile.imwrite(output_path, rgb, photometric='rgb')
         else:
             log.error(f" ┊      Unknown output format '{output_format}'")
             return False

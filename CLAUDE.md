@@ -45,6 +45,7 @@ Scripts Python pour organiser automatiquement les photos après téléchargement
 - `Pillow` (PIL) - manipulation d'images (AVIF, TIFF, JPEG)
 - `rawpy` - binding Python pour libraw (dématriçage RAW)
 - `numpy` - manipulation de tableaux (sortie rawpy → PIL)
+- `tifffile` - écriture TIFF 16-bit RGB (Pillow ne gère pas uint16 RGB)
 
 ### Outils système (requis)
 - `exiftool` - extraction métadonnées EXIF
