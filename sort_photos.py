@@ -21,10 +21,11 @@ import subprocess
 from dataclasses import dataclass  # Not used yet: field
 from datetime import datetime
 from PIL import Image  # If PIL module not installed, then: `pip install Pillow`
-# soon pillow-avif-plugin will also be required
 from PIL.ExifTags import TAGS
 from sys import argv
 from typing import Optional, List, Tuple
+import numpy as np
+import rawpy                        # Python binding for libraw (same engine as dcraw_emu)
 import xml.etree.ElementTree as ET
 
 # CONSTANTS:
@@ -62,6 +63,10 @@ def load_configuration():
         'Folders': {
             'root': '~/Images',
             'raw': 'RAW'
+        },
+        'Processing': {
+            'dark_frame': ''    # Path to dark frame file (PGM) for hot pixel subtraction.
+                                # Empty = disabled. Can be overridden by --dark-frame CLI argument.
         }
     })
 
@@ -72,10 +77,16 @@ def load_configuration():
     # root-folder will be used only if sort_photos.py is called without folder as argument.
     # Folder where raw files will be moved to (without final '/'):
     folder_for_raws_load_cfg = config['Folders']['raw']
-    return root_folder_load_cfg, folder_for_raws_load_cfg
+
+    # Dark frame path for hot/dead pixel subtraction (empty string = disabled)
+    dark_frame_load_cfg = config['Processing']['dark_frame']
+    if dark_frame_load_cfg:
+        dark_frame_load_cfg = os.path.expanduser(dark_frame_load_cfg)
+
+    return root_folder_load_cfg, folder_for_raws_load_cfg, dark_frame_load_cfg
 
 
-root_folder, FOLDER_FOR_RAWS = load_configuration()
+root_folder, FOLDER_FOR_RAWS, dark_frame_path = load_configuration()
 
 
 # if more global values must be used, then we would use config=load_configuration() and get them separately.
@@ -946,26 +957,14 @@ def get_files(photo_folder):
 
 
 def create_avif_for_raw(photo_folder, raw_file):
-    log.info(f"│\t  ↳ Create avif from file '{raw_file}'")
-    # FIXME Work in progress: method to be implemented yet!
-    src_image_fullpath = photo_folder + FOLDER_FOR_RAWS + "/" + raw_file
-    log.debug(f"│\t    opening file '{src_image_fullpath}'...")
-    split_filename = os.path.splitext(raw_file)
-    basename = split_filename[0]
-    extension: str = split_filename[1]
-    # if extension.lower() in {"exif"}:
-    #    # Pillow accepted formats: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
-    if extension.lower() == "cr3":
-        image_cr3 = None  # TODO Implementation on hold...
-    # Below command allowed to create a jpg:
-    # python parse_cr3.py /media/thomas/deimos.photo/2025/2025-02-02\ Sun\ -\ Panorama\ St\ Benoit\ et\ étang\ Laurent/IMG_8441.CR3 -v 1 -x
-    image = Image.open(src_image_fullpath)
-    # In order to get cr3 info., see https://github.com/lclevy/canon_cr3
+    """Deprecated: use create_avif_from_raw_file() instead.
+    Kept only for backward compatibility with move_raws() legacy code path."""
+    log.warning(f"│\t  ↳ create_avif_for_raw() is deprecated. Use create_avif_from_raw_file() instead.")
+    src_image_fullpath = os.path.join(photo_folder, FOLDER_FOR_RAWS, raw_file)
     basename = os.path.splitext(raw_file)[0]
-    image.save(photo_folder + basename + ".jpg")
-    image.save(photo_folder + basename + ".avif")
-    image.save(photo_folder + basename + ".tif")
-    return
+    avif_output_path = os.path.join(photo_folder, f"{basename}.avif")
+    develop_raw(src_image_fullpath, avif_output_path, output_format="avif", output_bps=8,
+                output_colorspace="srgb", dark_frame_path=dark_frame_path)
 
 
 def move_raws(photo_folder, raw_files, rendered_files, other_files):
@@ -1009,209 +1008,179 @@ def create_processed_images(photo_folder, files):
     return files
 
 
+# ─── RAW development engine ──────────────────────────────────────────────────
+
+# Mapping of colorspace names to rawpy constants
+COLORSPACE_MAP = {
+    'srgb': rawpy.ColorSpace.sRGB,           # Standard for web/screen display
+    'prophoto': rawpy.ColorSpace.ProPhoto,    # Wide gamut, ideal for HDR/panorama merging
+}
+
+
+def develop_raw(raw_file_path, output_path, output_format="avif",
+                output_bps=8, output_colorspace="srgb",
+                dark_frame_path=None):
+    """
+    Develop a RAW file using rawpy (Python binding for libraw).
+
+    This is the central function for all RAW-to-image conversions. It replaces
+    the previous subprocess calls to dcraw_emu with a native Python approach,
+    giving direct control over demosaicing parameters.
+
+    The processing pipeline is:
+        1. Load RAW Bayer data (rawpy.imread)
+        2. Optionally subtract dark frame (hot/dead pixel correction)
+        3. Demosaic with AHD algorithm (same as dcraw -q 3)
+        4. Apply camera white balance
+        5. Convert to target colorspace
+        6. Output at requested bit depth
+        7. Save via PIL in the requested format
+
+    Args:
+        raw_file_path:      Full path to the RAW file (.CR3, .CR2, .NEF, etc.)
+        output_path:        Full path for the output file (including extension)
+        output_format:      "avif" for 8-bit viewing images,
+                            "tiff" for 16-bit panorama/HDR processing
+        output_bps:         Bits per sample: 8 (AVIF/viewing) or 16 (TIFF/processing)
+        output_colorspace:  "srgb" (standard display) or "prophoto" (wide gamut)
+        dark_frame_path:    Optional path to a dark frame PGM file. This file contains
+                            the sensor's thermal noise pattern, captured with the lens cap on
+                            at the same ISO/exposure/temperature. Subtracted from raw Bayer
+                            data before demosaicing to eliminate hot/dead pixels.
+
+    Returns:
+        True if the image was created successfully, False otherwise.
+    """
+    log.debug(f" ┊   └→ develop_raw: '{raw_file_path}' → '{output_path}' "
+              f"(format={output_format}, bps={output_bps}, colorspace={output_colorspace})")
+
+    colorspace = COLORSPACE_MAP.get(output_colorspace)
+    if colorspace is None:
+        log.error(f" ┊      Unknown colorspace '{output_colorspace}'. "
+                  f"Valid values: {list(COLORSPACE_MAP.keys())}")
+        return False
+
+    try:
+        with rawpy.imread(raw_file_path) as raw:
+
+            # Build postprocess parameters
+            params = rawpy.Params(
+                use_camera_wb=True,                     # -w : use the white balance recorded by the camera
+                highlight_mode=rawpy.HighlightMode.Clip,  # -H 1 : clip highlights cleanly (no color shift)
+                output_color=colorspace,                # -o : target colorspace
+                output_bps=output_bps,                  # -4/-6 : bits per sample in output
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,  # -q 3 : Adaptive Homogeneity-Directed
+                no_auto_bright=True,                    # disable auto-brightness (preserve original exposure)
+                fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,  # -fbdd 1 : light noise reduction
+            )
+
+            # Dark frame subtraction: applied on raw Bayer data before demosaicing
+            if dark_frame_path:
+                log.info(f" ┊      Applying dark frame subtraction: '{dark_frame_path}'")
+                params = rawpy.Params(
+                    use_camera_wb=True,
+                    highlight_mode=rawpy.HighlightMode.Clip,
+                    output_color=colorspace,
+                    output_bps=output_bps,
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
+                    no_auto_bright=True,
+                    fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,
+                    dark_frame=dark_frame_path,         # -K : subtract dark frame before demosaicing
+                )
+
+            # Demosaic: convert Bayer pattern to RGB image
+            rgb = raw.postprocess(params)
+
+        # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
+        log.debug(f" ┊      Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
+
+        # Convert numpy array to PIL Image and save
+        img = Image.fromarray(rgb)
+
+        if output_format == "avif":
+            img.save(output_path, 'AVIF', quality=80, speed=6)
+        elif output_format == "tiff":
+            img.save(output_path, 'TIFF', compression='none')
+        else:
+            log.error(f" ┊      Unknown output format '{output_format}'")
+            return False
+
+        log.info(f" ┊      ✓ Created {output_format.upper()}: {output_path}")
+        return True
+
+    except rawpy.LibRawError as e:
+        log.error(f" ┊    → libraw error processing '{raw_file_path}': {e}")
+        return False
+
+    except Exception as e:
+        log.error(f" ┊    → Unexpected error developing '{raw_file_path}': {e}")
+        return False
+
+
 def create_tiff_16bit_from_raw(photo_folder, file_entry):
     """
-    Create a 16-bit ITFF image from a RAW file for panorama processing.
-    Uses dcraw to extract the RAW data.
-    
+    Create a 16-bit TIFF image from a RAW file for panorama/HDR processing.
+    Uses develop_raw() with 16-bit ProPhoto RGB settings to preserve maximum
+    color gamut and dynamic range for subsequent merging operations.
+
     Args:
         photo_folder (str): Base photo folder path
         file_entry (ImageFile): file entry containing required info (input file name, group, ...)
     """
-    log.debug(f" ┊   └→ Creating 16-bit TIFF from RAW file '{file_entry.raw_filename}'")
-
-    # Construct full path to RAW file (assuming it's in the RAW subfolder)
     raw_file_path = os.path.join(photo_folder, file_entry.raw_relative_path, file_entry.raw_filename)
-
-    # Extract basename without extension for output filename
     basename = os.path.splitext(file_entry.raw_filename)[0]
 
-    # Create group folder if it doesn't exist
+    # Create group folder (panorama/HDR images go into their group subfolder)
     group_folder = os.path.join(photo_folder, file_entry.group_id)
     if not os.path.exists(group_folder):
         os.makedirs(group_folder)
         log.debug(f" ┊      Created group folder: {group_folder}")
 
-    # Output PNG filename
-    png_filename = f"{basename}.png"
-    png_output_path = os.path.join(group_folder, png_filename)
+    tiff_filename = f"{basename}.tiff"
+    tiff_output_path = os.path.join(group_folder, tiff_filename)
 
-    try:
-        # Use dcraw to extract 16-bit TIFF data from RAW file
-        # -T: output TIFF format
-        # -4: 16-bit linear output
-        # -o 0: output colorspace sRGB
-        # -q 3: high quality interpolation
-        # -w: use camera white balance
+    success = develop_raw(
+        raw_file_path,
+        tiff_output_path,
+        output_format="tiff",
+        output_bps=16,                  # 16-bit for maximum dynamic range
+        output_colorspace="prophoto",   # ProPhoto RGB: widest gamut, ideal for merging
+        dark_frame_path=dark_frame_path,
+    )
 
-        # dcraw_cmd = [
-        #     'dcraw',
-        #     '-T',           # Output TIFF format
-        #     '-4',           # 16-bit linear output
-        #     '-o', '0',      # sRGB output colorspace
-        #     '-q', '3',      # High quality interpolation
-        #     '-w',           # Use camera white balance
-        #     '-c',           # Write to stdout
-        #     raw_file_path
-        # ]
-        # Given that upper caused issues with Canon CR3 images, we prefer the below:
-        dcraw_cmd = [
-            'dcraw_emu',  # Using libraw directly
-            # '-v',           # verbose
-            '-T',  # Output TIFF format (keep metadata, etc...)
-            '-6',  # 16-bit linear output
-            # '-o', '1',      # sRGB D65 (default)
-            '-o', '4',  # Kodak ProPhoto RGB D65 (for max gamut and compatibility)
-            # '-o', '3',  # Wide Gamut RGB D65 (fall-back if upper fails)
-            '-q', '3',  # High quality interpolation
-            '-w',  # Use camera white balance
-            # '-H', '2',      # Maybe the best in 8 bits but loses details in highlights in 16 bits
-            '-H', '1',  # Keep as much information as possible (highlights managed after merging)
-            '-fbdd', '1',  # noise reduction (?)
-            raw_file_path
-        ]
+    if success:
+        file_entry.processed_relative_path = file_entry.group_id
+        file_entry.processed_filename = tiff_filename
 
-        log.debug(f" ┊      Running dcraw command: {' '.join(dcraw_cmd)}")
-        # Execute dcraw and capture output
-        with open(f"/tmp/dcraw_{file_entry.basename}.log", 'wb') as temp_file:
-            result = subprocess.run(dcraw_cmd, stdout=temp_file, stderr=subprocess.PIPE, check=True)
-            log.debug(f" ┊      dcraw command result: {result}")
-        log.debug(f" ┊      dcraw command output: see file '{temp_file}'")
-
-        expected_tiff_out = raw_file_path + ".tiff"
-        shutil.move(
-            expected_tiff_out,
-            os.path.join(group_folder, f"{basename}.tiff")
-        )
-
-    except subprocess.CalledProcessError as e:
-        log.error(f" ┊    → dcraw failed for {file_entry.raw_filename}: {e.stderr.decode()}")
-        log.error(" ┊")
-        log.error(" ┊      STRONGLY ADVISE TO INSTALL dcraw !")
-        log.error(" ┊        MacOS: `brew install dcraw`")
-        log.error(" ┊        Linux: `sudo apt install dcraw` (Ubuntu), ...")
-        log.error(" ┊        ...")
-        log.error(" ┊")
-        # Fallback: try using PIL directly (may not be 16-bit)
-        try:
-            with Image.open(raw_file_path) as img:
-                img.save(png_output_path, 'PNG')
-                log.warning(f" ┊    → Created PNG using PIL fallback (may not be 16-bit): {png_output_path}")
-        except Exception as pil_error:
-            log.error(f" ┊    → Both dcraw and PIL failed for {file_entry.raw_filename}: {pil_error}")
-
-    except FileNotFoundError:
-        log.error(f" ┊    → dcraw not found. Please install dcraw for RAW processing.")
-        # Fallback to PIL
-        try:
-            with Image.open(raw_file_path) as img:
-                img.save(png_output_path, 'PNG')
-                log.warning(f" ┊    → Created PNG using PIL fallback (may not be 16-bit): {png_output_path}")
-        except Exception as pil_error:
-            log.error(f" ┊    → PIL fallback also failed for {file_entry.raw_filename}: {pil_error}")
-
-    except Exception as e:
-        log.error(f"Unexpected error processing {file_entry.raw_filename}: {e}")
+    return file_entry
 
 
 def create_avif_from_raw_file(photo_folder, file_entry):
     """
     Create an AVIF image from a RAW file for individual images (not in groups).
-    Uses dcraw to extract the RAW data and PIL to save as AVIF.
-    
+    Uses develop_raw() with 8-bit sRGB settings optimized for screen viewing.
+
     Args:
         photo_folder (str): Base photo folder path
         file_entry (ImageFile): file entry containing required info (input file name, paths, ...)
     """
-    log.debug(f" ┊   └→ Creating AVIF from RAW file '{file_entry.raw_filename}'")
-
-    # Construct full path to RAW file 
     raw_file_path = os.path.join(photo_folder, file_entry.raw_relative_path, file_entry.raw_filename)
-
-    # Extract basename without extension for output filename
     basename = os.path.splitext(file_entry.raw_filename)[0]
-
-    # Output AVIF filename in main folder
     avif_filename = f"{basename}.avif"
     avif_output_path = os.path.join(photo_folder, avif_filename)
 
-    try:
-        # First try using dcraw to extract high-quality 8-bit image for AVIF
-        # Use different parameters for AVIF (optimized for web/viewing)
-        dcraw_cmd = [
-            'dcraw_emu',  # Using libraw directly
-            # '-v',           # verbose
-            '-T',  # Output TIFF format (keep metadata, etc...)
-            #'-o', '4',  # Kodak ProPhoto RGB D65 (for max gamut and compatibility)
-            #'-q', '3',  # High quality interpolation
-            '-w',  # Use camera white balance
-            '-H', '9',
-            #'-H', '2',      # Maybe the best in 8 bits but loses details in highlights in 16 bits
-            # '-H', '1',  # Highlight mode: clip highlights
-            #'-q', '3',  # High quality interpolation
-            #'-o', '1',  # sRGB output colorspace
-            #'-fbdd', '1',  # Noise reduction
-            raw_file_path
-        ]
-        expected_tiff_out = raw_file_path + ".tiff"
-        log.debug(f"expexted output to {expected_tiff_out}")
+    success = develop_raw(
+        raw_file_path,
+        avif_output_path,
+        output_format="avif",
+        output_bps=8,
+        output_colorspace="srgb",
+        dark_frame_path=dark_frame_path,  # global, from config or CLI
+    )
 
-        log.debug(f" ┊      Running dcraw command: {' '.join(dcraw_cmd)}")
-
-        # Execute dcraw and capture PPM output
-        result = subprocess.run(dcraw_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-
-        # Convert PPM data to PIL Image
-        from io import BytesIO
-        ppm_data = BytesIO(result.stdout)
-
-        with Image.open(ppm_data) as img:
-            # Save as AVIF with good quality settings
-            img.save(avif_output_path, 'AVIF', quality=80, speed=6)
-            # Values for speed: default = 6
-            log.info(f"│ Created AVIF: {avif_output_path}")
-
-        # Update file_entry to reflect the new processed image
+    if success:
         file_entry.processed_relative_path = "."
         file_entry.processed_filename = avif_filename
-
-    except subprocess.CalledProcessError as e:
-        log.error(f" ┊    → dcraw failed for {file_entry.raw_filename}: {e.stderr.decode()}")
-        log.error(" ┊      Trying PIL fallback...")
-
-        # Fallback: try using PIL directly (may not be optimal quality)
-        try:
-            with Image.open(raw_file_path) as img:
-                # Save AVIF
-                img.save(avif_output_path, 'AVIF', quality=80)
-                log.warning(f" ┊    → Created AVIF using PIL fallback: {avif_output_path}")
-
-                # Update file_entry
-                file_entry.processed_relative_path = "."
-                file_entry.processed_filename = avif_filename
-
-        except Exception as pil_error:
-            log.error(f" ┊    → Both dcraw and PIL failed for {file_entry.raw_filename}: {pil_error}")
-
-    except FileNotFoundError:
-        log.error(f" ┊    → dcraw not found. Trying PIL fallback...")
-
-        # Fallback to PIL
-        try:
-            with Image.open(raw_file_path) as img:
-                # Save AVIF
-                img.save(avif_output_path, 'AVIF', quality=80)
-                log.warning(f" ┊    → Created AVIF using PIL fallback: {avif_output_path}")
-
-                # Update file_entry
-                file_entry.processed_relative_path = "."
-                file_entry.processed_filename = avif_filename
-
-        except Exception as pil_error:
-            log.error(f" ┊    → PIL fallback also failed for {file_entry.raw_filename}: {pil_error}")
-
-    except Exception as e:
-        log.error(f"Unexpected error processing {file_entry.raw_filename}: {e}")
 
     return file_entry
 
@@ -1523,25 +1492,47 @@ if __name__ == "__main__":
     # TODO Checks "panostart" command
     # panostart --output Makefile --projection 0 --fov 50 --nostacks --loquacious *.JPG
 
-    argList = list(argv)
-    nbArg = len(argList) - 1
-    log.info(f"{nbArg} arguments reçus: {argList}")
-    # Tests arguments validity:
-    if nbArg < 1 or nbArg > 2:
+    # Parse command line arguments:
+    # Positional: pictures_path [gpx_path]
+    # Optional:   --dark-frame /path/to/dark_frame.pgm
+    positional_args = []
+    dark_frame_arg = None
+
+    arg_list = list(argv[1:])  # skip script name
+    i = 0
+    while i < len(arg_list):
+        if arg_list[i] == '--dark-frame':
+            if i + 1 < len(arg_list):
+                dark_frame_arg = arg_list[i + 1]
+                i += 2
+            else:
+                log.critical("--dark-frame requires a path argument")
+                exit(RC_ATTRIBUTES_ERROR)
+        else:
+            positional_args.append(arg_list[i])
+            i += 1
+
+    log.info(f"{len(positional_args)} positional arguments: {positional_args}")
+
+    if len(positional_args) < 1 or len(positional_args) > 2:
         log.critical(ERROR)
-        log.critical(f"{argList[0]} requires 1 or 2 arguments:")
-        log.critical(f"{argList[0]} pictures_path [gpx_path]")
+        log.critical(f"{argv[0]} pictures_path [gpx_path] [--dark-frame path]")
         log.critical("Where:")
         log.critical("- pictures_path is the path where the pictures to sort are")
         log.critical("- gpx_path is the path of the gpx track file (optional)")
+        log.critical("- --dark-frame path to a dark frame PGM file for hot pixel subtraction (optional)")
         exit(RC_ATTRIBUTES_ERROR)
 
-    # Repertoire à analyser:
-    photo_folder_arg = argList[1]
-    if nbArg > 1:
-        gpx_file_arg = argList[2]
-    else:
-        gpx_file_arg = None
+    photo_folder_arg = positional_args[0]
+    gpx_file_arg = positional_args[1] if len(positional_args) > 1 else None
+
+    # CLI --dark-frame overrides config file value
+    if dark_frame_arg:
+        dark_frame_path = os.path.expanduser(dark_frame_arg)
+
+    if dark_frame_path and not os.path.isfile(dark_frame_path):
+        log.warning(f"Dark frame file '{dark_frame_path}' not found. Proceeding without dark frame subtraction.")
+        dark_frame_path = None
 
     if not os.path.isdir(photo_folder_arg):
         log.error(f"Folder '{photo_folder_arg}' given as argument is not detected as valid.")
