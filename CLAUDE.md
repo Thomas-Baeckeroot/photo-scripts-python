@@ -41,12 +41,13 @@ Scripts Python pour organiser automatiquement les photos après téléchargement
 
 ## Dépendances
 
-### Python
-- `Pillow` (PIL) - manipulation d'images
+### Python (voir `requirements.txt`)
+- `Pillow` (PIL) - manipulation d'images (AVIF, TIFF, JPEG)
+- `rawpy` - binding Python pour libraw (dématriçage RAW)
+- `numpy` - manipulation de tableaux (sortie rawpy → PIL)
 
 ### Outils système (requis)
 - `exiftool` - extraction métadonnées EXIF
-- `dcraw` / `dcraw_emu` - traitement fichiers RAW
 
 ## Structures de données clés
 
@@ -93,3 +94,8 @@ MIN_TIME_BETWEEN_PANOS = 15  # secondes entre photos d'un même groupe
 ```
 
 Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
+
+## TODO
+
+- [ ] Les AVIF générés depuis les RAW sont trop sombres (investiguer `no_auto_bright` et/ou appliquer une courbe gamma dans `develop_raw()`)
+- [ ] La création des fichiers TIFF 16-bit pour les panoramas a échoué (investiguer `develop_raw()` avec `output_bps=16` / `output_format="tiff"`)
