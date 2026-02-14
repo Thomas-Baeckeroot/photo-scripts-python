@@ -99,3 +99,4 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 
 - [ ] Les AVIF générés depuis les RAW sont trop sombres (investiguer `no_auto_bright` et/ou appliquer une courbe gamma dans `develop_raw()`)
 - [ ] La création des fichiers TIFF 16-bit pour les panoramas a échoué (investiguer `develop_raw()` avec `output_bps=16` / `output_format="tiff"`)
+- [ ] Appliquer les profils DCP Canon (Camera Standard) pour un rendu plus fidèle aux couleurs du boîtier. Profils disponibles dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`. Nécessite un parser DCP Python (matrice couleur + tone curve + look table).

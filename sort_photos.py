@@ -1064,14 +1064,23 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         with rawpy.imread(raw_file_path) as raw:
 
             # Build postprocess parameters
+            #
+            # Gamma: we use the default BT.709 curve (2.222, 4.5).
+            # RAW sensor data is linear (photon count), but human vision is non-linear.
+            # The gamma curve redistributes values so the output looks natural on screen.
+            # BT.709 was tested as the most faithful to the original CR3 rendering.
+            # Note: sRGB (2.4, 12.92) is slightly brighter; may be revisited if DCP
+            # camera profiles are applied in the future (Canon EOS R7 profiles exist
+            # at /Library/Application Support/Adobe/CameraRaw/CameraProfiles/).
             params = rawpy.Params(
                 use_camera_wb=True,                     # -w : use the white balance recorded by the camera
                 highlight_mode=rawpy.HighlightMode.Clip,  # -H 1 : clip highlights cleanly (no color shift)
                 output_color=colorspace,                # -o : target colorspace
                 output_bps=output_bps,                  # -4/-6 : bits per sample in output
                 demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,  # -q 3 : Adaptive Homogeneity-Directed
-                no_auto_bright=True,                    # disable auto-brightness (preserve original exposure)
+                # no_auto_bright=True,                    # disable auto-brightness (preserve original exposure)
                 fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,  # -fbdd 1 : light noise reduction
+                # gamma defaults to BT.709 (2.222, 4.5) — most faithful to CR3 original
             )
 
             # Dark frame subtraction: applied on raw Bayer data before demosaicing
@@ -1083,8 +1092,9 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                     output_color=colorspace,
                     output_bps=output_bps,
                     demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
-                    no_auto_bright=True,
+                    # no_auto_bright=True,
                     fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,
+                    # gamma defaults to BT.709 (2.222, 4.5)
                     dark_frame=dark_frame_path,         # -K : subtract dark frame before demosaicing
                 )
 
