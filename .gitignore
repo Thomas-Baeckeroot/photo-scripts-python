@@ -1,4 +1,15 @@
 # Default ignored files
 # JetBrains IDE files
 .idea/
+
+# IA and agents
+.claude/
+
+# Testing folders
 test-folder*/
+
+# Python
+__pycache__/
+*.pyc
+.venv*/
+.python-version
