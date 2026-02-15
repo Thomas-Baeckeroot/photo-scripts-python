@@ -7,6 +7,7 @@ It replaces the former sort_photos() function from the monolithic script.
 """
 
 import logging
+import os
 
 from photo_sorter.config import AppConfig
 from photo_sorter.display import log_files, log_title
@@ -14,6 +15,7 @@ from photo_sorter.file_ops import consolidate_images, move_raws_to_folder, scan_
 from photo_sorter.geotag import geotag_pictures
 from photo_sorter.grouping import confirm_groups, identify_advanced_image_groups
 from photo_sorter.metadata import extract_image_metadata
+from photo_sorter.panorama import create_panorama
 from photo_sorter.raw_processing import create_processed_images
 
 log = logging.getLogger(__name__)
@@ -62,6 +64,14 @@ def sort_photos(photo_folder, gpx_file, app_config):
     log_files(files, photo_folder)
 
     files = create_processed_images(photo_folder, files, app_config)
+
+    # Assemble panoramas from generated TIFFs
+    pano_groups = sorted({f.group_id for f in files
+                          if f.group_type == "panorama" and f.group_id})
+    for group_id in pano_groups:
+        pano_folder = os.path.join(photo_folder, group_id)
+        if os.path.isdir(pano_folder):
+            create_panorama(pano_folder)
 
     log_title("EXIT")
     log_files(files, photo_folder)
