@@ -574,6 +574,51 @@ def blend_panorama(remapped_files, output_path):
 
 
 # ---------------------------------------------------------------------------
+# TIFF → AVIF conversion
+# ---------------------------------------------------------------------------
+
+def convert_tiff_to_avif(tiff_path, avif_path, quality=80):
+    """
+    Convert a panorama TIFF (16-bit) to an 8-bit AVIF for viewing.
+
+    Args:
+        tiff_path: Path to the input TIFF file.
+        avif_path: Path for the output AVIF file.
+        quality: AVIF quality (0–100).
+
+    Returns:
+        bool: True if conversion succeeded.
+    """
+    import numpy as np
+    from PIL import Image
+
+    try:
+        img = Image.open(tiff_path)
+        log.debug(f"Read TIFF: mode={img.mode}, size={img.size}")
+
+        # Drop alpha channel if present (enblend may add one)
+        if img.mode in ('RGBA', 'LA', 'PA'):
+            img = img.convert('RGB')
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Convert 16-bit to 8-bit if needed
+        img_data = np.array(img)
+        if img_data.dtype == np.uint16:
+            img_data = (img_data / 256).astype(np.uint8)
+            img = Image.fromarray(img_data)
+
+        img.save(avif_path, 'AVIF', quality=quality, speed=6)
+
+        log.info(f"Converted to AVIF: '{avif_path}'")
+        return True
+
+    except Exception as e:
+        log.error(f"TIFF→AVIF conversion failed: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 
@@ -689,8 +734,17 @@ def create_panorama(pano_folder):
         log.error("Blending failed. Intermediate files kept for debugging.")
         return False
 
-    # --- Cleanup ---
+    # --- Cleanup nona intermediates ---
     cleanup_intermediate_files(remapped)
+
+    # --- Convert TIFF → AVIF ---
+    avif_path = os.path.join(parent_dir, f"{folder_name}.avif")
+    if convert_tiff_to_avif(output_path, avif_path):
+        os.remove(output_path)
+        log.info(f"Removed intermediate TIFF: '{output_path}'")
+        output_path = avif_path
+    else:
+        log.warning(f"AVIF conversion failed. Keeping TIFF: '{output_path}'")
 
     log.info(f"Panorama created: '{output_path}'")
     return True
