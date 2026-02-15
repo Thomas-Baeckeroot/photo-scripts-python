@@ -335,79 +335,66 @@ def filter_control_points(pano, max_error=CP_ERROR_THRESHOLD):
 # Optimisation (hsi pure)
 # ---------------------------------------------------------------------------
 
-def _build_optimize_vector(pano, variables):
+def _set_optimize_variables_via_pto(pano, pto_path, variables):
     """
-    Build an OptimizeVector for all images except image 0 (anchor).
+    Set optimisation variables by writing ``v`` lines into the PTO file.
 
-    The hsi SWIG bindings require manipulating entries obtained from the
-    vector (via ``ov[i]``) rather than pushing Python sets directly.
+    The hsi SWIG bindings for ``OptimizeVector`` (wrapping
+    ``std::vector<std::set<std::string>>``) are broken — neither
+    ``push_back`` nor ``__getitem__`` work with Python types.
+    This function works around the issue by manipulating the PTO text
+    directly and reloading it.
 
     Args:
-        pano: hsi.Panorama
-        variables: set of variable names (e.g. {"y", "p", "r"})
-
-    Returns:
-        hsi.OptimizeVector ready to pass to pano.setOptimizeVector().
+        pano: hsi.Panorama (will be written then reloaded).
+        pto_path: Path to the .pto file (overwritten in place).
+        variables: set of variable names (e.g. {"y", "p", "r", "v", "b"}).
     """
-    import hsi
+    pano.WritePTOFile(pto_path)
 
+    with open(pto_path, 'r') as f:
+        lines = f.readlines()
+
+    # Remove existing v lines
+    lines = [line for line in lines if not line.startswith('v ')]
+
+    # Add new v lines (image 0 is the anchor — not optimised)
     n_images = pano.getNrOfImages()
-    ov = hsi.OptimizeVector(n_images)
+    for i in range(1, n_images):
+        v_line = "v " + " ".join(f"{var}{i}" for var in sorted(variables))
+        lines.append(v_line + "\n")
 
-    for i in range(1, n_images):  # Image 0 is the anchor — not optimised
-        img_vars = ov[i]
-        for v in variables:
-            img_vars.add(v)
+    with open(pto_path, 'w') as f:
+        f.writelines(lines)
 
-    return ov
-
-
-def _run_optimization_pass(pano, variables, pass_name):
-    """
-    Run a single optimisation pass with the given variable set.
-
-    Args:
-        pano: hsi.Panorama
-        variables: set of variable names to optimise
-        pass_name: label for logging
-
-    Returns:
-        bool: True if optimisation succeeded.
-    """
-    import hsi
-
-    ov = _build_optimize_vector(pano, variables)
-    pano.setOptimizeVector(ov)
-
-    log.info(f"Optimisation {pass_name}: variables = {variables}")
-
-    try:
-        hsi.AutoOptimise(pano).runAlgorithm()
-        return True
-    except Exception as e:
-        log.warning(f"Optimisation {pass_name} failed: {e}")
-        return False
+    pano.ReadPTOFile(pto_path)
 
 
-def optimize_panorama(pano):
+def optimize_panorama(pano, pto_path):
     """
     Multi-pass panorama optimisation using hsi.
 
-    Pass 1: Basic geometry (y, p, r) for all images except anchor.
+    Pass 1: Basic geometry (y, p, r) via ``AutoOptimise.autoOptimise()``.
     Intermediate: filter outlier CPs after initial alignment.
-    Pass 2: Geometry + lens (y, p, r, v, b) for refined result.
+    Pass 2: Geometry + lens (y, p, r, v, b) via PTO ``v`` lines + PTOptimizer.
     Final: centre, straighten, and fit the panorama.
 
     Args:
         pano: hsi.Panorama with control points loaded.
+        pto_path: Path to the .pto file (used for PTO round-trips).
 
     Returns:
         bool: True if optimisation produced a usable result.
     """
     import hsi
 
-    # Pass 1 — basic geometry
-    if not _run_optimization_pass(pano, {"y", "p", "r"}, "pass 1 (geometry)"):
+    # Pass 1 — basic geometry (y/p/r)
+    # AutoOptimise.autoOptimise() sets up its own optimize vector internally
+    log.info("Optimisation pass 1 (geometry: y/p/r)...")
+    try:
+        hsi.AutoOptimise.autoOptimise(pano)
+    except Exception as e:
+        log.warning(f"Optimisation pass 1 failed: {e}")
         return False
 
     # Intermediate filtering — remove outliers after rough alignment
@@ -416,9 +403,14 @@ def optimize_panorama(pano):
         log.warning(f"Only {remaining} CPs remain after filtering — "
                     "result may be poor.")
 
-    # Pass 2 — geometry + lens parameters
-    _run_optimization_pass(pano, {"y", "p", "r", "v", "b"},
-                           "pass 2 (geometry + lens)")
+    # Pass 2 — geometry + lens parameters via PTO v lines
+    log.info("Optimisation pass 2 (geometry + lens: y/p/r/v/b)...")
+    try:
+        _set_optimize_variables_via_pto(
+            pano, pto_path, {"y", "p", "r", "v", "b"})
+        hsi.PTOptimizer(pano).runAlgorithm()
+    except Exception as e:
+        log.warning(f"Optimisation pass 2 failed: {e}")
 
     # Final geometric adjustments
     try:
@@ -673,7 +665,7 @@ def create_panorama(pano_folder):
         return False
 
     # --- Optimise ---
-    if not optimize_panorama(pano):
+    if not optimize_panorama(pano, pto_path):
         log.warning("Optimisation failed. Attempting to continue anyway.")
 
     # --- Configure output ---
