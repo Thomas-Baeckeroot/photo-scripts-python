@@ -1,69 +1,76 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Calls the sortPhoto script on each folder in *root* that:
-1- contain .RAW or .CR2 files
-2- does not contain a 'BRUTS' folder
+
+"""
+CLI entry point for batch processing: calls sort_photos on each subfolder
+of a root photo directory that contains RAW files but no RAW subfolder yet.
+
+Usage:
+    ./sort_photos_from_root_folder.py [root_photo_folder]
+
+If no folder is given, the root_folder from configuration is used.
 """
 
-from sys import argv
-from variables import *
+import logging
 import os
-import sort_photos
+from sys import argv
+
+from photo_sorter.config import load_configuration
+from photo_sorter.constants import RAW_EXTENSIONS
+from photo_sorter.pipeline import sort_photos
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s\t%(levelname)s\t%(filename)s:%(lineno)d\t%(message)s')
+log = logging.getLogger("sort_photos_from_root_folder.py")
 
 
-def main(photo_root_folder):
+def main(photo_root_folder, app_config):
+    """
+    Walk through subfolders of photo_root_folder and call sort_photos()
+    on each folder that contains RAW files but does not yet have a RAW subfolder.
+    """
+    log.info(f"Checking folder '{photo_root_folder}'...")
 
-    print("Checking folder %r..." % photo_root_folder)
+    for dirpath, subdirs, filenames in os.walk(photo_root_folder):
+        log.info(f"  🅵 Current folder: '{dirpath}'")
 
-    # Get list of folders of the root folder:
-    folders = os.walk(photo_root_folder)
+        # Skip if we are inside a RAW folder
+        if app_config.folder_for_raws in dirpath:
+            log.info("   ↳ inside a RAW folder, skipped")
+            continue
 
-    for folder in folders:
-        currentfolder = folder[0]
-        print("  🅵 Current folder: \"" + currentfolder + "\"")
-        if raw_folder in currentfolder:  # only check if it contains the word, should be safer if checking last folder.
-            print("   ↳ allowed to contain raw filename, skipped")
-            # do nothing more here, take the next folder...
-        else:
-            # not in a raw folder:
+        # Check if this folder already has a RAW subfolder
+        has_raw_folder = app_config.folder_for_raws in subdirs
 
-            contains_raw_folder = False
-            subfolders = folder[1]
-            for subfolder in subfolders:
-                print("    🄵 subfolder: \"" + subfolder + "\"")
-                if subfolder == raw_folder:
-                    contains_raw_folder = True
-                    break
+        if has_raw_folder:
+            log.info(f"   ↳ already has '{app_config.folder_for_raws}/' subfolder, skipped")
+            continue
 
-            files = folder[2]
-            for filename in files:
-                print("    🀨 filename: " + filename)
-                if "CR2" in filename:
-                    print("     ↳ is a raw filename!")
-                    if not contains_raw_folder:
-                        print("*    Start sorting folder \"" + currentfolder + "\"")
-                        columns = os.environ.get('COLUMNS', 80)
-                        print("★" * columns)
-                        sort_photos.sort_photos(currentfolder, None)
-                        print("★" * columns)
-                        # print("★*    Create folder \"" + raw_folder + "\"")
-                        # fixme os.makedirs(currentfolder + os.sep + raw_folder)
-                        contains_raw_folder = True
-                    print("★*    Move '" + currentfolder + os.sep + filename + "'to \"" + raw_folder + "\"")
-                    # fixme os.rename(
-                    #    currentfolder + os.sep + filename,
-                    #    currentfolder + os.sep + raw_folder + os.sep + filename)
-                    # )
+        # Check if this folder contains any RAW files
+        has_raw_files = any(
+            os.path.splitext(f)[1].lower() in RAW_EXTENSIONS
+            for f in filenames
+        )
+
+        if has_raw_files:
+            columns = os.environ.get('COLUMNS', 80)
+            log.info("★" * int(columns))
+            log.info(f"Start sorting folder '{dirpath}'")
+            sort_photos(dirpath, None, app_config)
+            log.info("★" * int(columns))
 
 
 if __name__ == "__main__":
-    argList = list(argv)
-    nbArg = len(argList) - 1
+    app_config = load_configuration()
 
-    # Take the root folder to review from argument or force to my value if not given:
-    if argList == 1:
-        photo_folder = argList[1]
+    if len(argv) > 1:
+        photo_folder = argv[1]
     else:
-        photo_folder = default_photo_folder
+        photo_folder = os.path.expanduser(app_config.root_folder)
 
-    main(photo_folder)
+    if not os.path.isdir(photo_folder):
+        log.error(f"Folder '{photo_folder}' is not a valid directory.")
+        exit(1)
+
+    main(photo_folder, app_config)
