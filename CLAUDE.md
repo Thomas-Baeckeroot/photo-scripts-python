@@ -27,10 +27,10 @@ Scripts Python pour organiser automatiquement les photos après téléchargement
 photo-scripts-python/
 ├── sort_photos.py                  # CLI : tri d'un dossier photo (thin wrapper)
 ├── sort_photos_from_root_folder.py # CLI : traitement par lot
-├── create_panorama.py              # CLI : placeholder (à réécrire avec hsi)
+├── create_panorama.py              # CLI : assemblage panorama via hsi (thin wrapper)
 ├── clone_test_folder.py            # Préparation des données de test
 ├── photo_sorter/                   # Package principal
-│   ├── __init__.py                 # Exporte sort_photos(), load_configuration(), AppConfig
+│   ├── __init__.py                 # Exporte sort_photos(), create_panorama(), load_configuration(), AppConfig
 │   ├── constants.py                # RAW_EXTENSIONS, RENDERED_EXTENSIONS, etc.
 │   ├── config.py                   # AppConfig dataclass + load_configuration()
 │   ├── models.py                   # ImageFile, GroupInfo dataclasses
@@ -39,6 +39,7 @@ photo-scripts-python/
 │   ├── metadata.py                 # EXIF via exiftool
 │   ├── grouping.py                 # Détection panoramas/HDR + confirmation interactive
 │   ├── raw_processing.py           # develop_raw(), create_avif, create_tiff
+│   ├── panorama.py                 # Assemblage panorama via hsi (Hugin Python bindings)
 │   ├── geotag.py                   # GPX parsing, géolocalisation
 │   └── pipeline.py                 # sort_photos() orchestrateur
 ├── requirements.txt
@@ -55,12 +56,12 @@ constants    config    models     (feuilles, pas d'import interne)
       \        |        /
        display  (→ models)
       /    |    \
-file_ops  metadata  grouping  raw_processing  geotag
+file_ops  metadata  grouping  raw_processing  geotag  panorama (→ display, metadata)
       \       |        |           |          /
        \      |        |           |         /
         pipeline  (→ tous les modules domaine)
             |
-        __init__  (→ config, pipeline)
+        __init__  (→ config, pipeline, panorama)
 ```
 
 ## Conventions de code
@@ -84,7 +85,9 @@ file_ops  metadata  grouping  raw_processing  geotag
 - `tifffile` - écriture TIFF 16-bit RGB (Pillow ne gère pas uint16 RGB)
 
 ### Outils système (requis)
-- `exiftool` - extraction métadonnées EXIF
+- `exiftool` - extraction métadonnées EXIF + géotagging via GPX
+- `hugin-tools` - assemblage panorama (fournit `hsi`, `cpfind`, `nona`) — Linux x86_64 uniquement
+- `enblend` - fusion d'images pour panoramas
 
 ## Structures de données clés
 
@@ -145,7 +148,20 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 
 ## TODO
 
-- [ ] Les AVIF générés depuis les RAW sont trop sombres (investiguer `no_auto_bright` et/ou appliquer une courbe gamma dans `develop_raw()`)
-- [ ] La création des fichiers TIFF 16-bit pour les panoramas a échoué (investiguer `develop_raw()` avec `output_bps=16` / `output_format="tiff"`)
-- [ ] Appliquer les profils DCP Canon (Camera Standard) pour un rendu plus fidèle aux couleurs du boîtier. Profils disponibles dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`. Nécessite un parser DCP Python (matrice couleur + tone curve + look table).
-- [ ] Réécrire `create_panorama.py` avec hsi (Hugin Python bindings) pour automatisation panorama (Linux x86_64)
+- [x] Réécrire `create_panorama.py` avec hsi (Hugin Python bindings) pour automatisation panorama (Linux x86_64)
+
+- [ ] Appliquer les profils DCP Canon (Camera Standard) pour un rendu plus fidèle aux couleurs du boîtier.  
+  Profils disponibles dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`.  
+  Nécessite un parser DCP Python (matrice couleur + tone curve + look table).
+
+- [ ] Les AVIF générés depuis les RAW sont trop sombres
+  - investiguer `no_auto_bright` et/ou appliquer une courbe gamma dans `develop_raw()`
+  - => à tester à nouveau après l'implémentation des profils DCP
+
+- [ ] **Mettre à jour `has_gps` après géotagging**
+  - Dans la liste des fichiers, l'attribut `gps` reste à `no` après ajout des infos GPS
+  - Devrait passer à `yes-gpx` pour indiquer que le GPS vient du fichier GPX
+
+- [ ] **Réduire la verbosité de exiftool**
+  - La sortie avec `-v1` (ligne 1198) reste trop verbeuse
+  - Option : filtrer la sortie ou utiliser un niveau de verbosité différent

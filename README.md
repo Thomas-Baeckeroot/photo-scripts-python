@@ -1,6 +1,28 @@
 # Scripts to automate picture/photo management
 
-Couple of scripts (in Python) to manage pictures:
+Couple of scripts (in Python) to manage pictures.
+
+## Installation
+
+### System dependencies
+
+```bash
+sudo apt install exiftool hugin-tools
+```
+
+`hugin-tools` provides the `hsi` Python module (Hugin scripting interface) and CLI tools (`cpfind`, `nona`, `enblend`) used for panorama stitching.
+
+### Python environment
+
+```bash
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+`--system-site-packages` is required so the venv can access the `hsi` module installed by `hugin-tools`.
+
+## Usage
 
 ### sort_photos.py
 
@@ -77,7 +99,7 @@ to organise it as:
 Panorama and set of pictures moved to a dedicated folder.  
 Raw files in "RAWs" folder.  
 If a raw file does not have a "small" version, then one is created (avif or jpeg).  
-If a .dxf file (GPS track) is found, JPG and avif are localised if no GPS info there.
+If a .gpx file (GPS track) is found, images are geotagged using `exiftool`.
 
 ---
 I'm wondering if the below would be better?
