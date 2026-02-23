@@ -64,8 +64,9 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     Returns:
         True if the image was created successfully, False otherwise.
     """
-    log.debug(f" ┊   └→ develop_raw: '{raw_file_path}' → '{output_path}' "
-              f"(format={output_format}, bps={output_bps}, colorspace={output_colorspace})")
+    log.debug(f" ┊   └→ develop_raw: '{raw_file_path}'")
+    log.debug(f" ┊                 → '{output_path}'")
+    log.debug(f" ┊                 (format={output_format}, bps={output_bps}, colorspace={output_colorspace})")
 
     colorspace = COLORSPACE_MAP.get(output_colorspace)
     if colorspace is None:
@@ -115,7 +116,7 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
             rgb = raw.postprocess(params)
 
         # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
-        log.debug(f" ┊      Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
+        log.debug(f" ┊                 Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
 
         if output_format == "avif":
             # 8-bit RGB → Pillow handles this fine
@@ -128,7 +129,7 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
             log.error(f" ┊      Unknown output format '{output_format}'")
             return False
 
-        log.info(f" ┊      ✓ Created {output_format.upper()}: {output_path}")
+        log.info(f" ┊                 ✓ Created {output_format.upper()}")
         return True
 
     except rawpy.LibRawError as e:
