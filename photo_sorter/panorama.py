@@ -47,6 +47,7 @@ CP_ERROR_THRESHOLD = 5.0            # Pixels — CPs above this are removed
 CPFIND_LINEARMATCH_LEN = 2          # Each image matched with its N neighbours
 DEFAULT_HFOV = 10.5                 # Canon EOS R7 + RF-S 18-150mm @ 150mm
 DEFAULT_CROP_FACTOR = 1.6           # APS-C
+MAX_PANORAMA_WIDTH = 20000          # Pixels — cap nona output to avoid TIFF 4 GB limit
 
 
 # ---------------------------------------------------------------------------
@@ -476,19 +477,23 @@ def configure_output(pano):
         opts.setProjection(hsi.PanoramaOptions.EQUIRECTANGULAR)
         log.info("Output projection: EQUIRECTANGULAR")
 
-    # Optimal scale → output width
+    # Optimal scale → output width (capped to avoid nona TIFF 4 GB crash)
     try:
         scale_calc = hsi.CalculateOptimalScale(pano)
         scale_calc.runAlgorithm()
         width = scale_calc.getResultOptimalWidth()
+        if width > MAX_PANORAMA_WIDTH:
+            log.warning(f"Optimal width {width}px exceeds cap {MAX_PANORAMA_WIDTH}px — scaling down.")
+            width = MAX_PANORAMA_WIDTH
         opts.setWidth(width)
-        log.info(f"Optimal output width: {width}px")
+        log.info(f"Output width: {width}px")
     except Exception as e:
         log.warning(f"CalculateOptimalScale failed: {e}")
 
     # Optimal ROI (crop black borders)
+    # CalculateOptimalROI requires a ProgressDisplay* argument (pass None for null pointer)
     try:
-        roi_calc = hsi.CalculateOptimalROI(pano)
+        roi_calc = hsi.CalculateOptimalROI(pano, None)
         roi_calc.runAlgorithm()
         roi = roi_calc.getResultOptimalROI()
         opts.setROI(roi)
