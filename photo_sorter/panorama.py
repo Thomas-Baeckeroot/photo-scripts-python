@@ -593,6 +593,7 @@ def convert_tiff_to_avif(tiff_path, avif_path, quality=80):
     from PIL import Image
 
     try:
+        Image.MAX_IMAGE_PIXELS = None  # Panoramas can exceed Pillow's default limit
         img = Image.open(tiff_path)
         log.debug(f"Read TIFF: mode={img.mode}, size={img.size}")
 
