@@ -223,7 +223,7 @@ def create_panorama_project(tiff_files, hfov):
         try:
             img.readEXIF()
             img.applyEXIFValues()
-        except Exception:
+        except RuntimeError:
             log.debug(f"readEXIF failed for '{os.path.basename(path)}', "
                       "reading dimensions with tifffile.")
             import tifffile

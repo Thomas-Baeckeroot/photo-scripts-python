@@ -9,8 +9,6 @@ Functions:
 
 import logging
 
-from photo_sorter.models import ImageFile
-
 log = logging.getLogger(__name__)
 
 
