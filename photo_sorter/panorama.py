@@ -668,7 +668,13 @@ def create_panorama(pano_folder):
     Returns:
         bool: True if the panorama was created successfully.
     """
-    import hsi
+    try:
+        import hsi  # noqa: F401 — Hugin Python bindings (Linux x86_64 only)
+    except ModuleNotFoundError:
+        log.warning("hsi module not found "
+                    "(Hugin Python bindings required, Linux x86_64 only. Sorry for Mac M1/... and others...). "
+                    "Skipping panorama assembly.")
+        return False
 
     log_title("Panorama assembly")
     pano_folder = os.path.abspath(pano_folder)
