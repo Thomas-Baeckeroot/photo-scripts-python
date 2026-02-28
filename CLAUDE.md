@@ -104,7 +104,7 @@ class AppConfig:
     root_folder: str = "~/Images"       # Dossier racine photo
     folder_for_raws: str = "RAW"        # Sous-dossier pour les RAW
     dark_frame_path: Optional[str] = None  # Chemin vers dark frame PGM
-    dcp_profile_path: Optional[str] = None # Profil DCP pour tone curve (None = auto-detect)
+    dcp_profile_path: Optional[str] = None # Profil DCP explicite (None = auto par PictureStyle)
 
 @dataclass
 class ImageFile:
@@ -118,6 +118,7 @@ class ImageFile:
     has_gps: bool                    # GPS présent
     group_id: Optional[str]          # ID groupe (panorama/HDR)
     group_type: Optional[str]        # Type: panorama, hdr, focus, burst
+    picture_style: Optional[str]     # Canon PictureStyle (Standard, Portrait, ...)
 ```
 
 ## Constantes importantes
@@ -191,6 +192,18 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   **Profils DCP disponibles** dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/` :
   `Camera Standard.dcp`, `Camera Landscape.dcp`, `Camera Faithful.dcp`, `Camera Neutral.dcp`,
   `Camera Portrait.dcp`, `Camera Monochrome.dcp`.
+
+- [x] **Sélection dynamique du profil DCP par PictureStyle EXIF**
+  Chaque photo Canon a un tag EXIF `PictureStyle` (Standard, Portrait, Landscape, etc.).
+  Le pipeline sélectionne maintenant automatiquement le profil DCP correspondant au style
+  utilisé lors de la prise de vue, au lieu d'appliquer systématiquement "Camera Standard".
+  - Nouveau champ `ImageFile.picture_style` extrait depuis EXIF dans `metadata.py`
+  - `DcpProfileCache` dans `dcp_profile.py` : cache lazy-loading des profils par style
+  - `resolve_dcp_path()` : mapping `PictureStyle → fichier DCP`, fallback sur "Standard"
+  - `create_processed_images()` : 3 modes de fonctionnement :
+    - Config explicite (`dcp_profile = /path`) → un profil pour toutes les images
+    - Auto-detect (config vide) → **per-image par PictureStyle** (nouveau)
+    - Pas de DCP disponible → BT.709 seul
 
 - [ ] **Mettre à jour `has_gps` après géotagging**
   - Dans la liste des fichiers, l'attribut `gps` reste à `no` après ajout des infos GPS

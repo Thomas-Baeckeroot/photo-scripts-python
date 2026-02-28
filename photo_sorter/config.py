@@ -11,7 +11,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from photo_sorter.constants import DEFAULT_DCP_PROFILE_PATH
+# Note: DEFAULT_DCP_PROFILE_DIR is used by raw_processing.py for per-PictureStyle
+# DCP profile auto-detection. config.py no longer auto-selects a specific DCP path.
 
 
 @dataclass
@@ -62,18 +63,18 @@ def load_configuration() -> AppConfig:
         dark_frame = None
 
     # DCP profile path for tone curve rendering
-    # "none" = explicitly disabled, empty = auto-detect Canon EOS R7 Camera Standard
+    # "none" = explicitly disabled
+    # empty  = auto-detect per PictureStyle (create_processed_images handles this)
+    # path   = force this specific DCP profile for all images
     dcp_profile = config['Processing']['dcp_profile']
     if dcp_profile.lower() == 'none':
         dcp_profile_path = None
     elif dcp_profile:
         dcp_profile_path = os.path.expanduser(dcp_profile)
     else:
-        # Auto-detect: use Canon EOS R7 Camera Standard if installed by Adobe
-        if os.path.isfile(DEFAULT_DCP_PROFILE_PATH):
-            dcp_profile_path = DEFAULT_DCP_PROFILE_PATH
-        else:
-            dcp_profile_path = None
+        # Auto mode: leave dcp_profile_path as None
+        # create_processed_images() will select per-image based on EXIF PictureStyle
+        dcp_profile_path = None
 
     return AppConfig(
         root_folder=root_folder,

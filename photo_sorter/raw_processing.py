@@ -19,8 +19,10 @@ from imagecodecs import avif_encode
 from PIL import Image
 
 from photo_sorter.config import AppConfig
+from photo_sorter.constants import DEFAULT_DCP_PROFILE_DIR
 from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
-                                       apply_lookup_table, parse_dcp_lookup_table)
+                                       apply_lookup_table, parse_dcp_lookup_table,
+                                       DcpProfileCache)
 from photo_sorter.display import log_title
 
 log = logging.getLogger(__name__)
@@ -287,29 +289,64 @@ def create_processed_images(photo_folder, files, app_config):
     """
     log.debug("START .create_processed_images()")
 
-    # Load DCP tone curve and lookup table once for all images.
+    # DCP profile loading strategy:
+    # - Explicit path in config → single profile for all images (existing behavior)
+    # - Auto-detect (no explicit path) → per-image selection by EXIF PictureStyle
     # Both are applied to AVIF (screen viewing) only — TIFF intermediates for
     # panorama/HDR stay linear to preserve dynamic range during merging.
-    tone_curve = None
-    lookup_table = None
+
+    # Mode 1: Explicit DCP profile path → single profile for all images
     if app_config.dcp_profile_path:
         tone_curve = parse_dcp_tone_curve(app_config.dcp_profile_path)
+        lookup_table = None
         if tone_curve is None:
             log.warning(" ├→ DCP profile configured but tone curve could not be loaded. "
                         "Falling back to BT.709 gamma.")
         else:
-            # Try to load Phase 2 lookup table (optional enhancement after tone curve)
             lookup_table = parse_dcp_lookup_table(app_config.dcp_profile_path)
-            if lookup_table is not None:
-                log.info(" ├→ Phase 2 3D LookTable loaded for fine-grained HSV corrections")
 
-    for file_entry in files:
-        if file_entry.raw_filename and not file_entry.processed_filename:
-            if file_entry.group_id:
-                log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' for group '{file_entry.group_id}'")
-                file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
-            else:  # no group_id for current file_entry
-                log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' for individual image")
-                create_avif_from_raw_file(photo_folder, file_entry, app_config,
-                                         tone_curve=tone_curve, lookup_table=lookup_table)
+        for file_entry in files:
+            if file_entry.raw_filename and not file_entry.processed_filename:
+                if file_entry.group_id:
+                    log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
+                              f"for group '{file_entry.group_id}'")
+                    file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
+                else:
+                    log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
+                              f"for individual image")
+                    create_avif_from_raw_file(photo_folder, file_entry, app_config,
+                                             tone_curve=tone_curve, lookup_table=lookup_table)
+
+    # Mode 2: Auto-detect → per-image DCP profile based on EXIF PictureStyle
+    elif os.path.isdir(DEFAULT_DCP_PROFILE_DIR):
+        dcp_cache = DcpProfileCache(DEFAULT_DCP_PROFILE_DIR)
+        log.info(f" ├→ DCP auto-detect: per-image profile selection from '{DEFAULT_DCP_PROFILE_DIR}'")
+
+        for file_entry in files:
+            if file_entry.raw_filename and not file_entry.processed_filename:
+                if file_entry.group_id:
+                    log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
+                              f"for group '{file_entry.group_id}'")
+                    file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
+                else:
+                    style = file_entry.picture_style or "Standard"
+                    tone_curve, lookup_table = dcp_cache.get(style)
+                    log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
+                              f"(PictureStyle='{style}')")
+                    create_avif_from_raw_file(photo_folder, file_entry, app_config,
+                                             tone_curve=tone_curve, lookup_table=lookup_table)
+
+    # Mode 3: No DCP available → BT.709 only (no tone curve, no LUT)
+    else:
+        for file_entry in files:
+            if file_entry.raw_filename and not file_entry.processed_filename:
+                if file_entry.group_id:
+                    log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
+                              f"for group '{file_entry.group_id}'")
+                    file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
+                else:
+                    log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
+                              f"for individual image (no DCP)")
+                    create_avif_from_raw_file(photo_folder, file_entry, app_config)
+
     return files

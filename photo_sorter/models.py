@@ -25,6 +25,7 @@ class ImageFile:
     has_gps: bool = False
     group_id: Optional[str] = None      # Group identifier (panorama, HDR, etc.)
     group_type: Optional[str] = None    # Group type: "panorama", "hdr", "focus", "group"
+    picture_style: Optional[str] = None # Canon PictureStyle (Standard, Portrait, Landscape, ...)
 
 
 @dataclass(order=True)

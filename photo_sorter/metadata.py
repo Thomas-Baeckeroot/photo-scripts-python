@@ -105,6 +105,7 @@ def extract_image_metadata(photo_folder, files):
     EXIF_DATETIME = 'DateTime'
     EXIF_EXPOSURE_TIME = 'ExposureTime'
     EXIF_GPS_INFO = 'GPSInfo'
+    EXIF_PICTURE_STYLE = 'PictureStyle'
 
     for file in files:
         # Only process files that are images (RAW or processed)
@@ -139,10 +140,15 @@ def extract_image_metadata(photo_folder, files):
             # Check if GPS data exists
             file.has_gps = EXIF_GPS_INFO in exif and exif[EXIF_GPS_INFO]
 
+            # Extract picture style (Canon: Standard, Portrait, Landscape, ...)
+            if EXIF_PICTURE_STYLE in exif:
+                file.picture_style = exif[EXIF_PICTURE_STYLE]
+
             log.debug(f"File '{file.original_filename}': "
                       f"timestamp={file.timestamp}; "
                       f"exposure={file.exposure_time}; "
-                      f"has GPS info = {file.has_gps}")
+                      f"has GPS info = {file.has_gps}; "
+                      f"picture style = {file.picture_style}")
         else:
             log.debug(f"File '{file.original_filename}' "
                       f"not identified as image (=> not checking EXIF data for timestamp, exposure time, or GPS info).")

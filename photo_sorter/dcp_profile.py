@@ -24,6 +24,7 @@ Reference: Adobe DNG Specification 1.6.0.0
 """
 
 import logging
+import os
 
 import numpy as np
 import tifffile
@@ -35,6 +36,96 @@ TAG_PROFILE_NAME = 50936
 TAG_PROFILE_TONE_CURVE = 50940
 TAG_PROFILE_LOOKUP_TABLE = 50982
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DCP profile resolution and caching (per-PictureStyle selection)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def resolve_dcp_path(picture_style, dcp_dir):
+    """
+    Build the DCP profile path for a given Canon PictureStyle.
+
+    Canon EOS R7 DCP files are named: "Canon EOS R7 Camera {Style}.dcp"
+
+    Args:
+        picture_style: Style name from EXIF (e.g. "Portrait", "Landscape")
+        dcp_dir:       Directory containing DCP files
+
+    Returns:
+        Absolute path to the DCP file, or None if the file doesn't exist.
+        Falls back to "Standard" if the requested style has no DCP.
+    """
+    dcp_filename = f"Canon EOS R7 Camera {picture_style}.dcp"
+    dcp_path = os.path.join(dcp_dir, dcp_filename)
+
+    if os.path.isfile(dcp_path):
+        return dcp_path
+
+    # Fallback to Standard if the requested style doesn't have a DCP
+    if picture_style != "Standard":
+        log.warning(f" ┊      No DCP profile for PictureStyle '{picture_style}', "
+                    f"falling back to 'Standard'")
+        fallback_path = os.path.join(dcp_dir, "Canon EOS R7 Camera Standard.dcp")
+        if os.path.isfile(fallback_path):
+            return fallback_path
+
+    log.warning(f" ┊      DCP profile not found: '{dcp_path}'")
+    return None
+
+
+def load_dcp_profile(dcp_path):
+    """
+    Load both tone curve and lookup table from a DCP file.
+
+    Args:
+        dcp_path: Absolute path to the .dcp file.
+
+    Returns:
+        Tuple (tone_curve, lookup_table) where each is a numpy array or None.
+    """
+    tone_curve = parse_dcp_tone_curve(dcp_path)
+    lookup_table = None
+    if tone_curve is not None:
+        lookup_table = parse_dcp_lookup_table(dcp_path)
+    return tone_curve, lookup_table
+
+
+class DcpProfileCache:
+    """
+    Lazy-loading cache for parsed DCP profiles, keyed by PictureStyle name.
+
+    Each style's DCP is read from disk only once, then cached as a
+    (tone_curve, lookup_table) tuple. This avoids re-parsing the same
+    TIFF file for every image in a batch that shares the same style.
+    """
+
+    def __init__(self, dcp_dir):
+        self._dcp_dir = dcp_dir
+        self._cache = {}  # {style_name: (tone_curve, lookup_table)}
+
+    def get(self, picture_style):
+        """
+        Return (tone_curve, lookup_table) for the given PictureStyle.
+
+        Loads and caches the profile on first access. Returns (None, None)
+        if the profile cannot be found or parsed.
+        """
+        if picture_style not in self._cache:
+            dcp_path = resolve_dcp_path(picture_style, self._dcp_dir)
+            if dcp_path:
+                tc, lut = load_dcp_profile(dcp_path)
+                self._cache[picture_style] = (tc, lut)
+                log.info(f" ┊      Loaded DCP profile for PictureStyle '{picture_style}' "
+                         f"(tone_curve={'yes' if tc is not None else 'no'}, "
+                         f"lookup_table={'yes' if lut is not None else 'no'})")
+            else:
+                self._cache[picture_style] = (None, None)
+        return self._cache[picture_style]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 1: ProfileToneCurve (tag 50940)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def parse_dcp_tone_curve(dcp_path):
     """
