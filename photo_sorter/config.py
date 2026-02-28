@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from photo_sorter.constants import DEFAULT_DCP_PROFILE_PATH
+
 
 @dataclass
 class AppConfig:
@@ -18,6 +20,7 @@ class AppConfig:
     root_folder: str = "~/Images"
     folder_for_raws: str = "RAW"
     dark_frame_path: Optional[str] = None
+    dcp_profile_path: Optional[str] = None   # Path to DCP file for tone curve (None = auto-detect)
 
 
 def load_configuration() -> AppConfig:
@@ -37,8 +40,11 @@ def load_configuration() -> AppConfig:
             'raw': 'RAW'
         },
         'Processing': {
-            'dark_frame': ''    # Path to dark frame file (PGM) for hot pixel subtraction.
+            'dark_frame': '',   # Path to dark frame file (PGM) for hot pixel subtraction.
                                 # Empty = disabled. Can be overridden by --dark-frame CLI argument.
+            'dcp_profile': '',  # Path to DCP camera profile for tone curve rendering.
+                                # Empty = auto-detect Canon EOS R7 Camera Standard if installed.
+                                # Set to "none" to disable DCP tone curve.
         }
     })
 
@@ -55,8 +61,23 @@ def load_configuration() -> AppConfig:
     else:
         dark_frame = None
 
+    # DCP profile path for tone curve rendering
+    # "none" = explicitly disabled, empty = auto-detect Canon EOS R7 Camera Standard
+    dcp_profile = config['Processing']['dcp_profile']
+    if dcp_profile.lower() == 'none':
+        dcp_profile_path = None
+    elif dcp_profile:
+        dcp_profile_path = os.path.expanduser(dcp_profile)
+    else:
+        # Auto-detect: use Canon EOS R7 Camera Standard if installed by Adobe
+        if os.path.isfile(DEFAULT_DCP_PROFILE_PATH):
+            dcp_profile_path = DEFAULT_DCP_PROFILE_PATH
+        else:
+            dcp_profile_path = None
+
     return AppConfig(
         root_folder=root_folder,
         folder_for_raws=folder_for_raws,
         dark_frame_path=dark_frame,
+        dcp_profile_path=dcp_profile_path,
     )

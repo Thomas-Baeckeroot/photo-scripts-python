@@ -22,5 +22,12 @@ FOLDER_BACKUP_GPS = "BackupBeforeGPS!AE!"
 RC_ATTRIBUTES_ERROR = -1
 RC_PATH_ERROR = -2
 
+# Default DCP profile path (Canon EOS R7 "Camera Standard", installed by Adobe Camera Raw / Lightroom).
+# Used for tone curve application when no explicit path is configured.
+DEFAULT_DCP_PROFILE_PATH = (
+    "/Library/Application Support/Adobe/CameraRaw/CameraProfiles/"
+    "Camera/Canon EOS R7/Canon EOS R7 Camera Standard.dcp"
+)
+
 # ANSI escape code for error messages
 ERROR = '\033[1;31mError:\033[0m '

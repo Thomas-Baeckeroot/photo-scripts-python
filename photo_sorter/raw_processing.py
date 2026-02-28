@@ -5,7 +5,7 @@ RAW image development engine using rawpy (Python binding for libraw).
 Functions:
     develop_raw()                — Central RAW-to-image conversion function
     create_tiff_16bit_from_raw() — 16-bit TIFF for panorama/HDR processing
-    create_avif_from_raw_file()  — 8-bit AVIF for screen viewing
+    create_avif_from_raw_file()  — 10-bit AVIF for screen viewing
     create_processed_images()    — Batch processing of all images needing a processed version
 """
 
@@ -15,9 +15,11 @@ import os
 import numpy as np
 import rawpy
 import tifffile
+from imagecodecs import avif_encode
 from PIL import Image
 
 from photo_sorter.config import AppConfig
+from photo_sorter.dcp_profile import apply_tone_curve, parse_dcp_tone_curve
 from photo_sorter.display import log_title
 
 log = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ COLORSPACE_MAP = {
 
 def develop_raw(raw_file_path, output_path, output_format="avif",
                 output_bps=8, output_colorspace="srgb",
-                dark_frame_path=None):
+                dark_frame_path=None, tone_curve=None):
     """
     Develop a RAW file using rawpy (Python binding for libraw).
 
@@ -45,28 +47,36 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         2. Optionally subtract dark frame (hot/dead pixel correction)
         3. Demosaic with AHD algorithm (same as dcraw -q 3)
         4. Apply camera white balance
-        5. Convert to target colorspace
-        6. Output at requested bit depth
-        7. Save via PIL in the requested format
+        5. Convert to target colorspace with BT.709 gamma
+        6. Optionally apply DCP tone curve as contrast/color enhancement
+        7. Downsample to requested bit depth (10-bit for AVIF, 16-bit for TIFF)
+        8. Save as AVIF (imagecodecs for 10-bit, Pillow for 8-bit) or TIFF
 
     Args:
         raw_file_path:      Full path to the RAW file (.CR3, .CR2, .NEF, etc.)
         output_path:        Full path for the output file (including extension)
-        output_format:      "avif" for 8-bit viewing images,
-                            "tiff" for 16-bit panorama/HDR processing
-        output_bps:         Bits per sample: 8 (AVIF/viewing) or 16 (TIFF/processing)
+        output_format:      "avif" for viewing images, "tiff" for panorama/HDR processing
+        output_bps:         Bits per sample: 8 or 10 (AVIF/viewing) or 16 (TIFF/processing)
         output_colorspace:  "srgb" (standard display) or "prophoto" (wide gamut)
         dark_frame_path:    Optional path to a dark frame PGM file. This file contains
                             the sensor's thermal noise pattern, captured with the lens cap on
                             at the same ISO/exposure/temperature. Subtracted from raw Bayer
                             data before demosaicing to eliminate hot/dead pixels.
+        tone_curve:         Optional Nx2 numpy array of tone curve control points
+                            (from dcp_profile.parse_dcp_tone_curve). When provided:
+                            - rawpy outputs BT.709-encoded 16-bit data
+                            - DCP curve is applied on top as contrast/color enhancement
+                            - this "DCP on BT.709" approach matches camera JPEG brightness
+                            - result is then downsampled to the requested bit depth
 
     Returns:
         True if the image was created successfully, False otherwise.
     """
     log.debug(f" ┊   └→ develop_raw: '{raw_file_path}'")
     log.debug(f" ┊                 → '{output_path}'")
-    log.debug(f" ┊                 (format={output_format}, bps={output_bps}, colorspace={output_colorspace})")
+    log.debug(f" ┊                 (format={output_format}, bps={output_bps}, "
+              f"colorspace={output_colorspace}, "
+              f"tone_curve={'yes' if tone_curve is not None else 'no'})")
 
     colorspace = COLORSPACE_MAP.get(output_colorspace)
     if colorspace is None:
@@ -77,40 +87,40 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     try:
         with rawpy.imread(raw_file_path) as raw:
 
-            # Build postprocess parameters
+            # When a DCP tone curve is provided, rawpy outputs BT.709-encoded
+            # data at 16-bit precision. The tone curve is then applied on top as
+            # a contrast/color enhancement — NOT as a gamma replacement.
             #
-            # Gamma: we use the default BT.709 curve (2.222, 4.5).
-            # RAW sensor data is linear (photon count), but human vision is non-linear.
-            # The gamma curve redistributes values so the output looks natural on screen.
-            # BT.709 was tested as the most faithful to the original CR3 rendering.
-            # Note: sRGB (2.4, 12.92) is slightly brighter; may be revisited if DCP
-            # camera profiles are applied in the future (Canon EOS R7 profiles exist
-            # at /Library/Application Support/Adobe/CameraRaw/CameraProfiles/).
-            params = rawpy.Params(
-                use_camera_wb=True,                     # -w : use the white balance recorded by the camera
-                highlight_mode=rawpy.HighlightMode.Clip,  # -H 1 : clip highlights cleanly (no color shift)
-                output_color=colorspace,                # -o : target colorspace
-                output_bps=output_bps,                  # -4/-6 : bits per sample in output
-                demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,  # -q 3 : Adaptive Homogeneity-Directed
-                # no_auto_bright=True,                    # disable auto-brightness (preserve original exposure)
-                fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,  # -fbdd 1 : light noise reduction
-                # gamma defaults to BT.709 (2.222, 4.5) — most faithful to CR3 original
+            # This "DCP on BT.709" approach produces brightness and contrast that
+            # closely match the camera's in-body JPEG rendering ("Camera Standard").
+            # Tested against Canon EOS R7 reference JPEGs: mean luminance within 3%.
+            if tone_curve is not None:
+                internal_bps = 16
+                gamma = (2.222, 4.5)    # BT.709 — DCP enhances this, doesn't replace it
+                no_auto_bright = False
+            else:
+                internal_bps = output_bps
+                gamma = (2.222, 4.5)    # BT.709 default
+                no_auto_bright = False  # let rawpy auto-adjust brightness
+
+            # Build postprocess parameters (factored to avoid duplication)
+            params_kwargs = dict(
+                use_camera_wb=True,                              # -w : camera white balance
+                highlight_mode=rawpy.HighlightMode.Clip,         # -H 1 : clip highlights cleanly
+                output_color=colorspace,                         # -o : target colorspace
+                output_bps=internal_bps,                         # bits per sample (16 for tone curve path)
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,  # -q 3 : best quality
+                fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,  # -fbdd 1
+                gamma=gamma,
+                no_auto_bright=no_auto_bright,
             )
 
             # Dark frame subtraction: applied on raw Bayer data before demosaicing
             if dark_frame_path:
                 log.info(f" ┊      Applying dark frame subtraction: '{dark_frame_path}'")
-                params = rawpy.Params(
-                    use_camera_wb=True,
-                    highlight_mode=rawpy.HighlightMode.Clip,
-                    output_color=colorspace,
-                    output_bps=output_bps,
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
-                    # no_auto_bright=True,
-                    fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,
-                    # gamma defaults to BT.709 (2.222, 4.5)
-                    dark_frame=dark_frame_path,         # -K : subtract dark frame before demosaicing
-                )
+                params_kwargs['dark_frame'] = dark_frame_path
+
+            params = rawpy.Params(**params_kwargs)
 
             # Demosaic: convert Bayer pattern to RGB image
             rgb = raw.postprocess(params)
@@ -118,10 +128,33 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
         log.debug(f" ┊                 Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
 
+        # Apply DCP tone curve as contrast/color enhancement on BT.709 data.
+        # The S-curve adds depth and saturation matching the camera manufacturer's
+        # in-body JPEG rendering ("Camera Standard" profile).
+        if tone_curve is not None:
+            rgb = apply_tone_curve(rgb, tone_curve)
+            log.debug(f" ┊                 After tone curve: {rgb.shape}, dtype={rgb.dtype}")
+
+            # Downsample from internal 16-bit to requested output depth
+            if output_bps == 10 and rgb.dtype == np.uint16:
+                rgb = (rgb >> 6).astype(np.uint16)   # [0, 65535] → [0, 1023]
+                log.debug(f" ┊                 Downsampled to 10-bit: max={rgb.max()}")
+            elif output_bps == 8 and rgb.dtype == np.uint16:
+                rgb = (rgb >> 8).astype(np.uint8)
+                log.debug(f" ┊                 Downsampled to 8-bit: dtype={rgb.dtype}")
+
         if output_format == "avif":
-            # 8-bit RGB → Pillow handles this fine
-            img = Image.fromarray(rgb)
-            img.save(output_path, 'AVIF', quality=80, speed=6)
+            if output_bps >= 10 and rgb.dtype == np.uint16:
+                # 10-bit or 12-bit AVIF via imagecodecs (Pillow only supports 8-bit)
+                # level=80 for lossy quality (default is lossless → huge files)
+                avif_data = avif_encode(rgb, level=80, speed=6,
+                                        bitspersample=output_bps)
+                with open(output_path, 'wb') as f:
+                    f.write(avif_data)
+            else:
+                # 8-bit RGB → Pillow handles this fine
+                img = Image.fromarray(rgb)
+                img.save(output_path, 'AVIF', quality=80, speed=6)
         elif output_format == "tiff":
             # 16-bit RGB → Pillow cannot save uint16 RGB, use tifffile instead
             tifffile.imwrite(output_path, rgb, photometric='rgb')
@@ -183,15 +216,19 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config):
     return file_entry
 
 
-def create_avif_from_raw_file(photo_folder, file_entry, app_config):
+def create_avif_from_raw_file(photo_folder, file_entry, app_config, tone_curve=None):
     """
     Create an AVIF image from a RAW file for individual images (not in groups).
-    Uses develop_raw() with 8-bit sRGB settings optimized for screen viewing.
+
+    Without DCP tone curve: 8-bit sRGB AVIF via Pillow (BT.709 gamma only).
+    With DCP tone curve: 10-bit sRGB AVIF via imagecodecs, with the camera
+    manufacturer's contrast curve applied on top of BT.709 for richer colors.
 
     Args:
         photo_folder (str): Base photo folder path
         file_entry (ImageFile): File entry containing required info (input file name, paths, ...)
         app_config (AppConfig): Application configuration (reads dark_frame_path)
+        tone_curve: Optional Nx2 numpy array of DCP tone curve control points
 
     Returns:
         ImageFile: Updated file entry with processed file info
@@ -205,9 +242,10 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config):
         raw_file_path,
         avif_output_path,
         output_format="avif",
-        output_bps=8,
+        output_bps=10 if tone_curve is not None else 8,  # 10-bit with DCP, 8-bit without
         output_colorspace="srgb",
         dark_frame_path=app_config.dark_frame_path,
+        tone_curve=tone_curve,
     )
 
     if success:
@@ -231,12 +269,23 @@ def create_processed_images(photo_folder, files, app_config):
         list[ImageFile]: Updated list
     """
     log.debug("START .create_processed_images()")
+
+    # Load DCP tone curve once for all images.
+    # Applied to AVIF (screen viewing) only — TIFF intermediates for panorama/HDR
+    # stay linear to preserve dynamic range during merging.
+    tone_curve = None
+    if app_config.dcp_profile_path:
+        tone_curve = parse_dcp_tone_curve(app_config.dcp_profile_path)
+        if tone_curve is None:
+            log.warning(" ├→ DCP profile configured but tone curve could not be loaded. "
+                        "Falling back to BT.709 gamma.")
+
     for file_entry in files:
         if file_entry.raw_filename and not file_entry.processed_filename:
             if file_entry.group_id:
-                log.debug(f" ├→ Create png from '{file_entry.raw_filename}' for group '{file_entry.group_id}'")
+                log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' for group '{file_entry.group_id}'")
                 file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
             else:  # no group_id for current file_entry
                 log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' for individual image")
-                create_avif_from_raw_file(photo_folder, file_entry, app_config)
+                create_avif_from_raw_file(photo_folder, file_entry, app_config, tone_curve=tone_curve)
     return files

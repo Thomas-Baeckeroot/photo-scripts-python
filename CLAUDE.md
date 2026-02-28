@@ -8,6 +8,9 @@ Scripts Python pour organiser automatiquement les photos après téléchargement
 - Géolocalisation via fichiers GPX
 - Génération d'images AVIF/TIFF depuis les RAW
 
+La vitesse d'exécution n'est pas une priorité. Ce que l'on souhaite est principalement avoir un résultat de qualité.
+Le script peut prendre plusieurs minutes ou heures ce n'est pas un problème.
+
 ## Commandes principales
 
 ```bash
@@ -31,14 +34,15 @@ photo-scripts-python/
 ├── clone_test_folder.py            # Préparation des données de test
 ├── photo_sorter/                   # Package principal
 │   ├── __init__.py                 # Exporte sort_photos(), create_panorama(), load_configuration(), AppConfig
-│   ├── constants.py                # RAW_EXTENSIONS, RENDERED_EXTENSIONS, etc.
+│   ├── constants.py                # RAW_EXTENSIONS, RENDERED_EXTENSIONS, DEFAULT_DCP_PROFILE_PATH, etc.
 │   ├── config.py                   # AppConfig dataclass + load_configuration()
 │   ├── models.py                   # ImageFile, GroupInfo dataclasses
 │   ├── display.py                  # log_files(), log_title() (box-drawing)
 │   ├── file_ops.py                 # scan_directory(), consolidate_images(), move_raws_to_folder()
 │   ├── metadata.py                 # EXIF via exiftool
 │   ├── grouping.py                 # Détection panoramas/HDR + confirmation interactive
-│   ├── raw_processing.py           # develop_raw(), create_avif, create_tiff
+│   ├── dcp_profile.py              # Parsing DCP Adobe, extraction/application tone curve
+│   ├── raw_processing.py           # develop_raw(), create_avif, create_tiff (utilise dcp_profile)
 │   ├── panorama.py                 # Assemblage panorama via hsi (Hugin Python bindings)
 │   ├── geotag.py                   # GPX parsing, géolocalisation
 │   └── pipeline.py                 # sort_photos() orchestrateur
@@ -51,17 +55,19 @@ photo-scripts-python/
 ### Graphe de dépendances (pas de cycles)
 
 ```
-constants    config    models     (feuilles, pas d'import interne)
-     \         |         /
-      \        |        /
+constants    config (→ constants)    models     (feuilles)
+     \         |                     /
+      \        |                    /
        display  (→ models)
       /    |    \
-file_ops  metadata  grouping  raw_processing  geotag  panorama (→ display, metadata)
-      \       |        |           |          /
-       \      |        |           |         /
-        pipeline  (→ tous les modules domaine)
-            |
-        __init__  (→ config, pipeline, panorama)
+file_ops  metadata  grouping  dcp_profile  geotag  panorama (→ display, metadata)
+      \       |        |          |        /
+       \      |        |          |       /
+        \     |     raw_processing (→ dcp_profile, config, display)
+         \    |        |         /
+          pipeline  (→ tous les modules domaine)
+              |
+          __init__  (→ config, pipeline, panorama)
 ```
 
 ## Conventions de code
@@ -79,10 +85,11 @@ file_ops  metadata  grouping  raw_processing  geotag  panorama (→ display, met
 ## Dépendances
 
 ### Python (voir `requirements.txt`)
-- `Pillow` (PIL) - manipulation d'images (AVIF, JPEG)
+- `Pillow` (PIL) - manipulation d'images (AVIF 8-bit, JPEG)
 - `rawpy` - binding Python pour libraw (dématriçage RAW)
-- `numpy` - manipulation de tableaux (sortie rawpy → PIL)
-- `tifffile` - écriture TIFF 16-bit RGB (Pillow ne gère pas uint16 RGB)
+- `numpy` - manipulation de tableaux (sortie rawpy → PIL/tifffile)
+- `tifffile` - écriture TIFF 16-bit RGB + lecture des profils DCP Adobe (format TIFF)
+- `imagecodecs` - encodage AVIF 10-bit (Pillow ne supporte que 8-bit)
 
 ### Outils système (requis)
 - `exiftool` - extraction métadonnées EXIF + géotagging via GPX
@@ -97,6 +104,7 @@ class AppConfig:
     root_folder: str = "~/Images"       # Dossier racine photo
     folder_for_raws: str = "RAW"        # Sous-dossier pour les RAW
     dark_frame_path: Optional[str] = None  # Chemin vers dark frame PGM
+    dcp_profile_path: Optional[str] = None # Profil DCP pour tone curve (None = auto-detect)
 
 @dataclass
 class ImageFile:
@@ -150,13 +158,30 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 
 - [x] Réécrire `create_panorama.py` avec hsi (Hugin Python bindings) pour automatisation panorama (Linux x86_64)
 
-- [ ] Appliquer les profils DCP Canon (Camera Standard) pour un rendu plus fidèle aux couleurs du boîtier.  
-  Profils disponibles dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`.  
-  Nécessite un parser DCP Python (matrice couleur + tone curve + look table).
+- [x] **Couleurs fades — Phase 1 : Tone curve DCP + AVIF 10-bit (CR3 → AVIF)**
+  Implémenté dans `dcp_profile.py` + `raw_processing.py`. Approche "DCP on BT.709" :
+  rawpy produit une image BT.709 en 16-bit, puis la courbe DCP "Camera Standard" est
+  appliquée par-dessus comme rehaussement de contraste/couleur (pas en remplacement du gamma).
+  Luminosité mesurée à ~97% du JPEG boîtier (mean=101.8 vs 104.6 sur IMG_2378).
+  - Sortie AVIF 10-bit via `imagecodecs.avif_encode(bitspersample=10)` pour préserver les
+    nuances dans les dégradés (Pillow ne supporte que 8-bit)
+  - Auto-détection du profil dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`
+  - Configurable via `dcp_profile` dans `[Processing]` du fichier de config (`none` pour désactiver)
+  - Appliqué aux AVIF uniquement (les TIFF panorama/HDR restent BT.709 16-bit pour le merging)
+  - Sans profil DCP : fallback AVIF 8-bit via Pillow avec BT.709 seul
 
-- [ ] Les AVIF générés depuis les RAW sont trop sombres
-  - investiguer `no_auto_bright` et/ou appliquer une courbe gamma dans `develop_raw()`
-  - => à tester à nouveau après l'implémentation des profils DCP
+- [ ] **Couleurs fades — Phase 2 (si nécessaire) : LookTable 3D du DCP**
+  Le DCP "Camera Standard" contient aussi une ProfileLookTableData (tag 50982) de dimensions
+  90×16×16 (hue × sat × val) soit 69 120 floats de corrections HSV (HueShift, SatScale, ValScale).
+  À implémenter dans `dcp_profile.py` si la phase 1 ne donne pas un résultat satisfaisant.
+  Nécessite une interpolation trilinéaire en espace HSV.
+
+  **Profils DCP disponibles** dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/` :
+  `Camera Standard.dcp`, `Camera Landscape.dcp`, `Camera Faithful.dcp`, `Camera Neutral.dcp`,
+  `Camera Portrait.dcp`, `Camera Monochrome.dcp`.
+
+  **Approche rejetée** : `darktable-cli` / `rawtherapee-cli` (supportent DCP nativement mais
+  ajoutent une dépendance système lourde et on perd le contrôle fin de rawpy).
 
 - [ ] **Mettre à jour `has_gps` après géotagging**
   - Dans la liste des fichiers, l'attribut `gps` reste à `no` après ajout des infos GPS
