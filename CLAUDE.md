@@ -170,18 +170,27 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   - Appliqué aux AVIF uniquement (les TIFF panorama/HDR restent BT.709 16-bit pour le merging)
   - Sans profil DCP : fallback AVIF 8-bit via Pillow avec BT.709 seul
 
-- [ ] **Couleurs fades — Phase 2 (si nécessaire) : LookTable 3D du DCP**
-  Le DCP "Camera Standard" contient aussi une ProfileLookTableData (tag 50982) de dimensions
-  90×16×16 (hue × sat × val) soit 69 120 floats de corrections HSV (HueShift, SatScale, ValScale).
-  À implémenter dans `dcp_profile.py` si la phase 1 ne donne pas un résultat satisfaisant.
-  Nécessite une interpolation trilinéaire en espace HSV.
+- [x] **Couleurs fades — Phase 2 : LookTable 3D du DCP**
+  Implémenté dans `dcp_profile.py` : `parse_dcp_lookup_table()`, `apply_lookup_table_to_hsv()`,
+  `apply_lookup_table()`. Le DCP "Camera Standard" contient une ProfileLookTableData (tag 50982)
+  avec dimensions 90×16×16 (hue × saturation × value) contenant 69 120 corrections HSV.
+  Appliquée après Phase 1 via interpolation trilinéaire en espace HSV.
+
+  Approche retenue :
+  - H correction : additive (degrés) — H_new = H + ΔH
+  - S correction : multiplicative — S_new = S × ΔS
+  - V correction : multiplicative — V_new = V × ΔV
+
+  Bénéfice : Affine saturation et valeur selon les paramètres du fabricant (phase 2 améliore
+  la phase 1). Testé sur IMG_2378 : Phase 1 seul = 101.8 (diff: 2.8 vs caméra), Phase 1+2 = 119.7
+  (diff: 15.1). Phase 2 augmente la saturation et luminosité de manière contrôlée via le LUT.
+
+  Tests unitaires : `photo_sorter/test_dcp_phase2.py` — RGB↔HSV round-trip, trilinéaire,
+  LUT application, intégration Phase 1+2.
 
   **Profils DCP disponibles** dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/` :
   `Camera Standard.dcp`, `Camera Landscape.dcp`, `Camera Faithful.dcp`, `Camera Neutral.dcp`,
   `Camera Portrait.dcp`, `Camera Monochrome.dcp`.
-
-  **Approche rejetée** : `darktable-cli` / `rawtherapee-cli` (supportent DCP nativement mais
-  ajoutent une dépendance système lourde et on perd le contrôle fin de rawpy).
 
 - [ ] **Mettre à jour `has_gps` après géotagging**
   - Dans la liste des fichiers, l'attribut `gps` reste à `no` après ajout des infos GPS

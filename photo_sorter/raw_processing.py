@@ -19,7 +19,8 @@ from imagecodecs import avif_encode
 from PIL import Image
 
 from photo_sorter.config import AppConfig
-from photo_sorter.dcp_profile import apply_tone_curve, parse_dcp_tone_curve
+from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
+                                       apply_lookup_table, parse_dcp_lookup_table)
 from photo_sorter.display import log_title
 
 log = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ COLORSPACE_MAP = {
 
 def develop_raw(raw_file_path, output_path, output_format="avif",
                 output_bps=8, output_colorspace="srgb",
-                dark_frame_path=None, tone_curve=None):
+                dark_frame_path=None, tone_curve=None, lookup_table=None):
     """
     Develop a RAW file using rawpy (Python binding for libraw).
 
@@ -48,9 +49,10 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         3. Demosaic with AHD algorithm (same as dcraw -q 3)
         4. Apply camera white balance
         5. Convert to target colorspace with BT.709 gamma
-        6. Optionally apply DCP tone curve as contrast/color enhancement
-        7. Downsample to requested bit depth (10-bit for AVIF, 16-bit for TIFF)
-        8. Save as AVIF (imagecodecs for 10-bit, Pillow for 8-bit) or TIFF
+        6. Optionally apply DCP tone curve (Phase 1) as contrast/color enhancement
+        7. Optionally apply DCP 3D LookTable (Phase 2) for fine-grained HSV corrections
+        8. Downsample to requested bit depth (10-bit for AVIF, 16-bit for TIFF)
+        9. Save as AVIF (imagecodecs for 10-bit, Pillow for 8-bit) or TIFF
 
     Args:
         raw_file_path:      Full path to the RAW file (.CR3, .CR2, .NEF, etc.)
@@ -68,6 +70,10 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                             - DCP curve is applied on top as contrast/color enhancement
                             - this "DCP on BT.709" approach matches camera JPEG brightness
                             - result is then downsampled to the requested bit depth
+        lookup_table:       Optional (90, 16, 16, 3) numpy array of HSV corrections
+                            (from dcp_profile.parse_dcp_lookup_table). Applied AFTER
+                            tone curve via trilinear interpolation in HSV space.
+                            Only used for AVIF output (not TIFF)
 
     Returns:
         True if the image was created successfully, False otherwise.
@@ -134,6 +140,13 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         if tone_curve is not None:
             rgb = apply_tone_curve(rgb, tone_curve)
             log.debug(f" ┊                 After tone curve: {rgb.shape}, dtype={rgb.dtype}")
+
+            # Apply DCP 3D LookTable (Phase 2) for fine-grained HSV corrections.
+            # Ordered after tone curve: first establish contrast/saturation, then
+            # apply manufacturer's hue/sat/val corrections.
+            if lookup_table is not None:
+                rgb = apply_lookup_table(rgb, lookup_table)
+                log.debug(f" ┊                 After lookup table: {rgb.shape}, dtype={rgb.dtype}")
 
             # Downsample from internal 16-bit to requested output depth
             if output_bps == 10 and rgb.dtype == np.uint16:
@@ -216,19 +229,22 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config):
     return file_entry
 
 
-def create_avif_from_raw_file(photo_folder, file_entry, app_config, tone_curve=None):
+def create_avif_from_raw_file(photo_folder, file_entry, app_config,
+                             tone_curve=None, lookup_table=None):
     """
     Create an AVIF image from a RAW file for individual images (not in groups).
 
-    Without DCP tone curve: 8-bit sRGB AVIF via Pillow (BT.709 gamma only).
-    With DCP tone curve: 10-bit sRGB AVIF via imagecodecs, with the camera
-    manufacturer's contrast curve applied on top of BT.709 for richer colors.
+    Without DCP: 8-bit sRGB AVIF via Pillow (BT.709 gamma only).
+    With DCP tone curve alone: 10-bit sRGB AVIF via imagecodecs, with the camera
+    manufacturer's contrast curve applied on top of BT.709.
+    With DCP tone curve + lookup table: 10-bit sRGB AVIF with Phase 2 HSV corrections.
 
     Args:
         photo_folder (str): Base photo folder path
         file_entry (ImageFile): File entry containing required info (input file name, paths, ...)
         app_config (AppConfig): Application configuration (reads dark_frame_path)
-        tone_curve: Optional Nx2 numpy array of DCP tone curve control points
+        tone_curve: Optional Nx2 numpy array of DCP tone curve control points (Phase 1)
+        lookup_table: Optional (90, 16, 16, 3) numpy array of HSV corrections (Phase 2)
 
     Returns:
         ImageFile: Updated file entry with processed file info
@@ -246,6 +262,7 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config, tone_curve=N
         output_colorspace="srgb",
         dark_frame_path=app_config.dark_frame_path,
         tone_curve=tone_curve,
+        lookup_table=lookup_table,
     )
 
     if success:
@@ -270,15 +287,21 @@ def create_processed_images(photo_folder, files, app_config):
     """
     log.debug("START .create_processed_images()")
 
-    # Load DCP tone curve once for all images.
-    # Applied to AVIF (screen viewing) only — TIFF intermediates for panorama/HDR
-    # stay linear to preserve dynamic range during merging.
+    # Load DCP tone curve and lookup table once for all images.
+    # Both are applied to AVIF (screen viewing) only — TIFF intermediates for
+    # panorama/HDR stay linear to preserve dynamic range during merging.
     tone_curve = None
+    lookup_table = None
     if app_config.dcp_profile_path:
         tone_curve = parse_dcp_tone_curve(app_config.dcp_profile_path)
         if tone_curve is None:
             log.warning(" ├→ DCP profile configured but tone curve could not be loaded. "
                         "Falling back to BT.709 gamma.")
+        else:
+            # Try to load Phase 2 lookup table (optional enhancement after tone curve)
+            lookup_table = parse_dcp_lookup_table(app_config.dcp_profile_path)
+            if lookup_table is not None:
+                log.info(" ├→ Phase 2 3D LookTable loaded for fine-grained HSV corrections")
 
     for file_entry in files:
         if file_entry.raw_filename and not file_entry.processed_filename:
@@ -287,5 +310,6 @@ def create_processed_images(photo_folder, files, app_config):
                 file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
             else:  # no group_id for current file_entry
                 log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' for individual image")
-                create_avif_from_raw_file(photo_folder, file_entry, app_config, tone_curve=tone_curve)
+                create_avif_from_raw_file(photo_folder, file_entry, app_config,
+                                         tone_curve=tone_curve, lookup_table=lookup_table)
     return files
