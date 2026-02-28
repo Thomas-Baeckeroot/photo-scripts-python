@@ -329,8 +329,9 @@ def _rgb_to_hsv(rgb):
     # Value
     v = max_c
 
-    # Saturation
-    s = np.where(max_c > 1e-10, delta / max_c, 0.0)
+    # Saturation (use safe denominator to avoid division by zero warning)
+    max_c_safe = np.maximum(max_c, 1e-10)
+    s = np.where(max_c > 1e-10, delta / max_c_safe, 0.0)
 
     # Hue (avoiding division by zero)
     h = np.zeros_like(r)
@@ -428,9 +429,10 @@ def apply_lookup_table_to_hsv(hsv, lut):
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
 
     # Normalize HSV to LUT indices
-    h_norm = (h / 360.0) * 89.0  # [0, 89]
-    s_norm = s * 15.0             # [0, 15]
-    v_norm = v * 15.0             # [0, 15]
+    # 90 hue divisions = 4° each → h=4° maps to index 1.0, h=360° wraps to 0
+    h_norm = (h / 360.0) * 90.0   # [0, 90) — wraps via modulo
+    s_norm = s * 15.0              # [0, 15]
+    v_norm = v * 15.0              # [0, 15]
 
     # Decompose into integer and fractional parts
     h_floor = np.floor(h_norm).astype(np.int32)
@@ -442,8 +444,8 @@ def apply_lookup_table_to_hsv(hsv, lut):
     v_floor = np.floor(v_norm).astype(np.int32)
     v_frac = v_norm - v_floor
 
-    # Clamp indices to valid ranges
-    h_floor = np.clip(h_floor, 0, 89)
+    # Clamp/wrap indices to valid ranges
+    h_floor = h_floor % 90         # Hue wraps (circular axis)
     s_floor = np.clip(s_floor, 0, 15)
     v_floor = np.clip(v_floor, 0, 15)
 
@@ -491,21 +493,70 @@ def apply_lookup_table_to_hsv(hsv, lut):
     return hsv_corrected
 
 
-def apply_lookup_table(rgb, lut):
+def _bt709_linearize(rgb_float):
+    """
+    Invert BT.709 gamma encoding: convert [0, 1] gamma-encoded to [0, 1] linear.
+
+    Implements the inverse of the BT.709 OETF (Opto-Electronic Transfer Function).
+    Used to recover linear RGB from rawpy's BT.709 output before applying the
+    DCP LookTable, which is designed to operate on linear data per the DNG spec.
+    """
+    threshold = 0.081  # BT.709 breakpoint: 4.5 * 0.018
+    return np.where(
+        rgb_float < threshold,
+        rgb_float / 4.5,
+        np.power(np.clip((rgb_float + 0.099) / 1.099, 0, None), 1.0 / 0.45)
+    )
+
+
+def _bt709_encode(rgb_linear):
+    """
+    Apply BT.709 gamma encoding: convert [0, 1] linear to [0, 1] gamma-encoded.
+
+    Implements the BT.709 OETF (Opto-Electronic Transfer Function).
+    Used to re-encode linear RGB after LookTable application, before the
+    ToneCurve is applied on BT.709 data.
+    """
+    threshold = 0.018  # BT.709 linear breakpoint
+    return np.where(
+        rgb_linear < threshold,
+        4.5 * rgb_linear,
+        1.099 * np.power(np.clip(rgb_linear, 0, None), 0.45) - 0.099
+    )
+
+
+def apply_lookup_table(rgb, lut, linearize_bt709=False):
     """
     Apply 3D HSV lookup table to an RGB image.
 
     Orchestrates the complete process:
         1. Normalize RGB from [0, max] to [0, 1]
-        2. Convert RGB → HSV
-        3. Apply trilinear LUT interpolation
-        4. Convert HSV → RGB
-        5. Denormalize RGB back to original range
-        6. Clamp and return
+        2. Optionally linearize (invert BT.709 gamma) for correct LUT domain
+        3. Convert RGB → HSV
+        4. Apply trilinear LUT interpolation
+        5. Convert HSV → RGB
+        6. Compensate mean brightness shift from saturation corrections
+        7. Optionally re-encode BT.709 gamma
+        8. Denormalize RGB back to original range and clamp
+
+    Per the DNG specification, the ProfileLookTableData is designed to operate
+    on linear RGB data (in RIMM/ProPhoto primaries). When `linearize_bt709=True`,
+    the BT.709 gamma is inverted before HSV conversion and re-applied after,
+    so the LUT corrections happen in the correct linear domain.
+
+    **Brightness compensation**: The LUT's saturation corrections (desaturation)
+    increase apparent RGB luminance after HSV→RGB conversion, because lower
+    saturation moves colors toward gray (higher mean RGB). In the standard DNG
+    pipeline, the ToneCurve is calibrated to account for this. In our approximate
+    "DCP on BT.709" pipeline, we compensate by normalizing the mean brightness
+    back to the pre-LUT level, preserving all color corrections while preventing
+    the brightness shift.
 
     Args:
         rgb: (H, W, 3) numpy array, dtype uint8 or uint16.
         lut: (90, 16, 16, 3) lookup table from parse_dcp_lookup_table().
+        linearize_bt709: If True, invert BT.709 gamma before LUT application
+                         and re-encode after. Required when input is BT.709-encoded.
 
     Returns:
         (H, W, 3) array, same dtype as input, with LUT corrections applied.
@@ -523,7 +574,14 @@ def apply_lookup_table(rgb, lut):
     # Normalize RGB to [0, 1]
     rgb_norm = rgb.astype(np.float64) / max_val
 
-    # Convert to HSV
+    # Optionally linearize: invert BT.709 gamma to recover linear RGB
+    if linearize_bt709:
+        rgb_norm = _bt709_linearize(rgb_norm)
+
+    # Record mean brightness before LUT for compensation
+    mean_before = rgb_norm.mean()
+
+    # Convert to HSV (in linear space if linearized)
     hsv = _rgb_to_hsv(rgb_norm)
 
     # Apply LUT
@@ -531,6 +589,21 @@ def apply_lookup_table(rgb, lut):
 
     # Convert back to RGB
     rgb_corrected = _hsv_to_rgb(hsv_corrected)
+
+    # Compensate brightness shift caused by saturation corrections.
+    # Desaturation moves colors toward gray, increasing RGB mean luminance.
+    # We scale the result to match the original mean brightness so the
+    # subsequent ToneCurve operates on data with the correct brightness level.
+    mean_after = rgb_corrected.mean()
+    if mean_after > 1e-10:
+        brightness_ratio = mean_before / mean_after
+        rgb_corrected = rgb_corrected * brightness_ratio
+        log.debug(f" ┊      LUT brightness compensation: "
+                  f"ratio={brightness_ratio:.4f} (1.0 = no change)")
+
+    # Optionally re-encode BT.709 gamma
+    if linearize_bt709:
+        rgb_corrected = _bt709_encode(np.clip(rgb_corrected, 0, 1))
 
     # Denormalize and clamp
     rgb_out = np.clip(rgb_corrected * max_val, 0, max_val)

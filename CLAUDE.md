@@ -163,7 +163,8 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   Implémenté dans `dcp_profile.py` + `raw_processing.py`. Approche "DCP on BT.709" :
   rawpy produit une image BT.709 en 16-bit, puis la courbe DCP "Camera Standard" est
   appliquée par-dessus comme rehaussement de contraste/couleur (pas en remplacement du gamma).
-  Luminosité mesurée à ~97% du JPEG boîtier (mean=101.8 vs 104.6 sur IMG_2378).
+  Luminosité Phase 1 seule : mean=101.8 vs caméra=104.6 sur IMG_2378 (diff: 2.8).
+  Avec Phase 2 (LUT + compensation) : mean=104.2 vs 104.6 (diff: 0.4 — quasi parfait).
   - Sortie AVIF 10-bit via `imagecodecs.avif_encode(bitspersample=10)` pour préserver les
     nuances dans les dégradés (Pillow ne supporte que 8-bit)
   - Auto-détection du profil dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`
@@ -173,18 +174,28 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 
 - [x] **Couleurs fades — Phase 2 : LookTable 3D du DCP**
   Implémenté dans `dcp_profile.py` : `parse_dcp_lookup_table()`, `apply_lookup_table_to_hsv()`,
-  `apply_lookup_table()`. Le DCP "Camera Standard" contient une ProfileLookTableData (tag 50982)
-  avec dimensions 90×16×16 (hue × saturation × value) contenant 69 120 corrections HSV.
-  Appliquée après Phase 1 via interpolation trilinéaire en espace HSV.
+  `apply_lookup_table()`. Le DCP contient une ProfileLookTableData (tag 50982) avec dimensions
+  90×16×16 (hue × saturation × value) contenant 69 120 corrections HSV.
 
-  Approche retenue :
+  **Ordre de traitement** (conforme à la spécification DNG Adobe) :
+  1. rawpy → image BT.709 16-bit
+  2. **Phase 2 (LookTable)** : linéarisation BT.709 → corrections HSV → ré-encodage BT.709
+  3. **Phase 1 (ToneCurve)** : courbe S sur données BT.709
+
+  Le LUT est appliqué **AVANT** la ToneCurve (spec DNG : LookTable opère sur données linéaires,
+  avant conversion perceptuelle). Pour cela, le gamma BT.709 est inversé avant le LUT
+  (`_bt709_linearize()`), puis ré-appliqué (`_bt709_encode()`).
+
+  **Compensation de luminosité** : la désaturation HSV augmente la luminance RGB apparente
+  (les couleurs désaturées → plus proches du gris → mean RGB plus élevé). Dans le pipeline DNG
+  réel, la ToneCurve est calibrée pour cet effet. Dans notre approximation "DCP on BT.709",
+  on compense en normalisant le mean RGB après le LUT pour retrouver le niveau pré-LUT.
+  Résultat : mean=104.2 vs caméra=104.6 (diff: 0.4 — quasi parfait).
+
+  Corrections retenues :
   - H correction : additive (degrés) — H_new = H + ΔH
   - S correction : multiplicative — S_new = S × ΔS
   - V correction : multiplicative — V_new = V × ΔV
-
-  Bénéfice : Affine saturation et valeur selon les paramètres du fabricant (phase 2 améliore
-  la phase 1). Testé sur IMG_2378 : Phase 1 seul = 101.8 (diff: 2.8 vs caméra), Phase 1+2 = 119.7
-  (diff: 15.1). Phase 2 augmente la saturation et luminosité de manière contrôlée via le LUT.
 
   Tests unitaires : `photo_sorter/test_dcp_phase2.py` — RGB↔HSV round-trip, trilinéaire,
   LUT application, intégration Phase 1+2.

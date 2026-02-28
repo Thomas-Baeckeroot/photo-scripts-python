@@ -136,19 +136,29 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
         log.debug(f" ┊                 Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
 
-        # Apply DCP tone curve as contrast/color enhancement on BT.709 data.
+        # DCP processing order follows the DNG specification:
+        #   1. LookTable (Phase 2) — fine-grained HSV corrections in LINEAR space
+        #   2. ToneCurve (Phase 1) — contrast/color S-curve on BT.709 data
+        #
+        # The LookTable must be applied BEFORE the ToneCurve because:
+        # - The DNG spec applies LUT on linear data, then ToneCurve converts to perceptual
+        # - Applying LUT after ToneCurve causes over-brightening (corrections compound
+        #   with the S-curve's contrast boost in doubly-nonlinear space)
+        #
+        # Since rawpy outputs BT.709-encoded data, we linearize (invert BT.709 gamma)
+        # before the LUT, then re-encode BT.709 for the ToneCurve.
+
+        # Phase 2: Apply DCP 3D LookTable in linear space (before tone curve)
+        if tone_curve is not None and lookup_table is not None:
+            rgb = apply_lookup_table(rgb, lookup_table, linearize_bt709=True)
+            log.debug(f" ┊                 After lookup table (linear): {rgb.shape}, dtype={rgb.dtype}")
+
+        # Phase 1: Apply DCP tone curve as contrast/color enhancement on BT.709 data.
         # The S-curve adds depth and saturation matching the camera manufacturer's
         # in-body JPEG rendering ("Camera Standard" profile).
         if tone_curve is not None:
             rgb = apply_tone_curve(rgb, tone_curve)
             log.debug(f" ┊                 After tone curve: {rgb.shape}, dtype={rgb.dtype}")
-
-            # Apply DCP 3D LookTable (Phase 2) for fine-grained HSV corrections.
-            # Ordered after tone curve: first establish contrast/saturation, then
-            # apply manufacturer's hue/sat/val corrections.
-            if lookup_table is not None:
-                rgb = apply_lookup_table(rgb, lookup_table)
-                log.debug(f" ┊                 After lookup table: {rgb.shape}, dtype={rgb.dtype}")
 
             # Downsample from internal 16-bit to requested output depth
             if output_bps == 10 and rgb.dtype == np.uint16:
