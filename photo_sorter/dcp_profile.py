@@ -54,6 +54,23 @@ M_XYZ_TO_SRGB = np.array([
     [ 0.0556434, -0.2040259,  1.0572252],
 ], dtype=np.float64)
 
+# sRGB linear ↔ ProPhoto linear conversion matrices.
+# The DNG/DCP LookTable is designed to operate in ProPhoto RGB (RIMM/ROMM,
+# ISO 22028-2) with D50 white point. Since rawpy outputs sRGB (D65), we
+# convert to ProPhoto before applying the LUT and back to sRGB after.
+# Computed via: M_XYZ_D50_to_ProPhoto @ M_Bradford_D65_to_D50 @ M_sRGB_to_XYZ_D65
+M_SRGB_TO_PROPHOTO = np.array([
+    [0.5293459, 0.3300728, 0.1405813],
+    [0.0983744, 0.8734611, 0.0281647],
+    [0.0168832, 0.1176725, 0.8654443],
+], dtype=np.float64)
+
+M_PROPHOTO_TO_SRGB = np.array([
+    [ 2.0340762, -0.7273343, -0.3067417],
+    [-0.2288134,  1.2317302, -0.0029169],
+    [-0.0085698, -0.1532866,  1.1618564],
+], dtype=np.float64)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Phase 3: ColorMatrix parsing and illuminant-based color correction
@@ -757,23 +774,27 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
         1. Normalize RGB from [0, max] to [0, 1]
         2. Optionally linearize (invert BT.709 gamma) for correct LUT domain
         3. Optionally apply Phase 3 color correction matrix (in linear sRGB)
-        4. Convert RGB → HSV
-        5. Apply trilinear LUT interpolation
-        6. Convert HSV → RGB
-        7. Compensate mean brightness shift from saturation corrections
-        8. Optionally re-encode BT.709 gamma
-        9. Denormalize RGB back to original range and clamp
+        4. Convert linear sRGB → linear ProPhoto RGB (correct LUT domain)
+        5. Convert ProPhoto RGB → HSV
+        6. Apply trilinear LUT interpolation in ProPhoto HSV
+        7. Convert HSV → ProPhoto RGB
+        8. Compensate mean brightness shift from saturation corrections
+        9. Convert linear ProPhoto → linear sRGB
+       10. Optionally re-encode BT.709 gamma
+       11. Denormalize RGB back to original range and clamp
 
-    Per the DNG specification, the ProfileLookTableData is designed to operate
-    on linear RGB data (in RIMM/ProPhoto primaries). When `linearize_bt709=True`,
-    the BT.709 gamma is inverted before HSV conversion and re-applied after,
-    so the LUT corrections happen in the correct linear domain.
+    **ProPhoto color space**: The DNG specification defines the LookTable to
+    operate in RIMM/ProPhoto RGB (ISO 22028-2, D50 white point). Applying the
+    LUT in sRGB produces incorrect hue shifts because the same spectral color
+    has different HSV coordinates in sRGB vs ProPhoto. For example, amber
+    (tungsten-lit scenes) maps to ~27° hue in sRGB but ~43° in ProPhoto,
+    causing the LUT to look up the wrong correction voxels.
 
     **Phase 3 color correction**: When `color_correction_matrix` is provided,
-    it is applied in linear sRGB space (after linearization, before HSV conversion).
-    This corrects for rawpy/libraw's D65-only ColorMatrix under non-D65 illuminants
-    (e.g., tungsten at 3700K). At D65, the matrix is None (identity), so daylight
-    images are unaffected.
+    it is applied in linear sRGB space (after linearization, before ProPhoto
+    conversion). This corrects for rawpy/libraw's D65-only ColorMatrix under
+    non-D65 illuminants (e.g., tungsten at 3700K). At D65, the matrix is None
+    (identity), so daylight images are unaffected.
 
     **Brightness compensation**: The LUT's saturation corrections (desaturation)
     increase apparent RGB luminance after HSV→RGB conversion, because lower
@@ -789,7 +810,8 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
         linearize_bt709: If True, invert BT.709 gamma before LUT application
                          and re-encode after. Required when input is BT.709-encoded.
         color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
-                                 correction. Applied in linear sRGB before HSV conversion.
+                                 correction. Applied in linear sRGB before ProPhoto
+                                 conversion.
 
     Returns:
         (H, W, 3) array, same dtype as input, with LUT corrections applied.
@@ -814,22 +836,33 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
     # Phase 3: Apply color correction matrix in linear sRGB space.
     # This corrects for rawpy using only the D65 ColorMatrix (CM2) when the
     # scene illuminant requires an interpolated matrix (CM1/CM2 blend).
-    # Must be applied before HSV conversion since the matrix operates on linear RGB.
+    # Must be applied before ProPhoto conversion since the matrix is sRGB-based.
     if color_correction_matrix is not None:
         rgb_norm = np.einsum('ij,hwj->hwi', color_correction_matrix, rgb_norm)
         rgb_norm = np.clip(rgb_norm, 0.0, 1.0)
         log.debug(" ┊      Phase 3 color correction applied (in linear sRGB)")
 
-    # Record mean brightness before LUT for compensation
-    mean_before = rgb_norm.mean()
+    # Convert linear sRGB → linear ProPhoto RGB for correct LUT domain.
+    # The DNG LookTable is designed for ProPhoto (RIMM) primaries — applying it
+    # in sRGB causes incorrect hue shifts (e.g., amber 27° in sRGB → 43° in
+    # ProPhoto, which hits very different LUT voxels).
+    if linearize_bt709:
+        rgb_prophoto = np.einsum('ij,hwj->hwi', M_SRGB_TO_PROPHOTO, rgb_norm)
+        rgb_prophoto = np.clip(rgb_prophoto, 0.0, 1.0)
+        log.debug(" ┊      Converted to ProPhoto RGB for LUT application")
+    else:
+        rgb_prophoto = rgb_norm
 
-    # Convert to HSV (in linear space if linearized)
-    hsv = _rgb_to_hsv(rgb_norm)
+    # Record mean brightness before LUT for compensation (in ProPhoto space)
+    mean_before = rgb_prophoto.mean()
 
-    # Apply LUT
+    # Convert to HSV in ProPhoto space
+    hsv = _rgb_to_hsv(rgb_prophoto)
+
+    # Apply LUT (corrections designed for ProPhoto HSV)
     hsv_corrected = apply_lookup_table_to_hsv(hsv, lut)
 
-    # Convert back to RGB
+    # Convert back to RGB (still in ProPhoto space)
     rgb_corrected = _hsv_to_rgb(hsv_corrected)
 
     # Compensate brightness shift caused by saturation corrections.
@@ -843,9 +876,15 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
         log.debug(f" ┊      LUT brightness compensation: "
                   f"ratio={brightness_ratio:.4f} (1.0 = no change)")
 
+    # Convert linear ProPhoto → linear sRGB (inverse of the earlier conversion)
+    if linearize_bt709:
+        rgb_corrected = np.einsum('ij,hwj->hwi', M_PROPHOTO_TO_SRGB, rgb_corrected)
+        rgb_corrected = np.clip(rgb_corrected, 0.0, 1.0)
+        log.debug(" ┊      Converted back to sRGB from ProPhoto")
+
     # Optionally re-encode BT.709 gamma
     if linearize_bt709:
-        rgb_corrected = _bt709_encode(np.clip(rgb_corrected, 0, 1))
+        rgb_corrected = _bt709_encode(rgb_corrected)
 
     # Denormalize and clamp
     rgb_out = np.clip(rgb_corrected * max_val, 0, max_val)

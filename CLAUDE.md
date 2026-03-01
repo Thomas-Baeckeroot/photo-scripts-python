@@ -179,13 +179,22 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   90×16×16 (hue × saturation × value) contenant 69 120 corrections HSV.
 
   **Ordre de traitement** (conforme à la spécification DNG Adobe) :
-  1. rawpy → image BT.709 16-bit
-  2. **Phase 2 (LookTable)** : linéarisation BT.709 → corrections HSV → ré-encodage BT.709
-  3. **Phase 1 (ToneCurve)** : courbe S sur données BT.709
+  1. rawpy → image BT.709 16-bit (sRGB)
+  2. **Phase 3** : linéarisation BT.709 → matrice 3×3 correction ColorMatrix → clip
+  3. **Phase 2 (LookTable)** : sRGB linéaire → ProPhoto linéaire → HSV → LUT → RGB → sRGB linéaire
+  4. Ré-encodage BT.709
+  5. **Phase 1 (ToneCurve)** : courbe S sur données BT.709
 
   Le LUT est appliqué **AVANT** la ToneCurve (spec DNG : LookTable opère sur données linéaires,
   avant conversion perceptuelle). Pour cela, le gamma BT.709 est inversé avant le LUT
   (`_bt709_linearize()`), puis ré-appliqué (`_bt709_encode()`).
+
+  **Espace couleur ProPhoto** : le LUT du DCP est conçu pour l'espace ProPhoto/RIMM RGB
+  (ISO 22028-2, point blanc D50). L'appliquer en sRGB produit des shifts de teinte incorrects
+  car les mêmes couleurs spectrales ont des coordonnées HSV différentes en sRGB vs ProPhoto
+  (ex: ambre = 27° en sRGB mais 43° en ProPhoto → le LUT accède aux mauvais voxels).
+  La conversion sRGB↔ProPhoto utilise les matrices `M_SRGB_TO_PROPHOTO` / `M_PROPHOTO_TO_SRGB`
+  calculées via Bradford CAT D65→D50.
 
   **Compensation de luminosité** : la désaturation HSV augmente la luminance RGB apparente
   (les couleurs désaturées → plus proches du gris → mean RGB plus élevé). Dans le pipeline DNG
@@ -232,11 +241,12 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   - À 3700K : correction R+3%, B+9%, G quasi inchangé (via termes hors-diagonale)
 
   **Ordre de traitement** dans `develop_raw()` :
-  1. rawpy → BT.709 16-bit
-  2. **Phase 3** : linéarisation BT.709 → matrice 3×3 → clip [0, 1]
-  3. **Phase 2** : LookTable HSV (dans le même espace linéaire)
-  4. Ré-encodage BT.709
-  5. **Phase 1** : ToneCurve
+  1. rawpy → BT.709 16-bit (sRGB)
+  2. Linéarisation BT.709
+  3. **Phase 3** : matrice 3×3 correction ColorMatrix en sRGB linéaire → clip [0, 1]
+  4. **Phase 2** : sRGB linéaire → ProPhoto linéaire → HSV → LookTable → RGB → sRGB linéaire
+  5. Ré-encodage BT.709
+  6. **Phase 1** : ToneCurve (courbe S sur données BT.709)
 
   **Fichiers modifiés** :
   - `constants.py` : `ILLUMINANT_TEMP` — dict code DNG → Kelvin (17→2856K, 21→6504K, etc.)
@@ -245,7 +255,9 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   - `dcp_profile.py` : `_parse_rational_matrix()`, `parse_dcp_color_matrices()`,
     `compute_color_correction_matrix()`, `apply_color_correction()`.
     Matrices standard `M_SRGB_TO_XYZ` / `M_XYZ_TO_SRGB` (IEC 61966-2-1).
-    `apply_lookup_table()` accepte `color_correction_matrix` (appliquée avant HSV).
+    Matrices `M_SRGB_TO_PROPHOTO` / `M_PROPHOTO_TO_SRGB` (via Bradford CAT D65→D50).
+    `apply_lookup_table()` : accepte `color_correction_matrix` (Phase 3, en sRGB linéaire)
+    et convertit en ProPhoto pour le LUT (Phase 2).
     `load_dcp_profile()` retourne 6-tuple `(tc, lut, cm1, cm2, temp1, temp2)`.
     `DcpProfileCache.get()` retourne le même 6-tuple.
   - `raw_processing.py` : `develop_raw()` et `create_avif_from_raw_file()` acceptent
