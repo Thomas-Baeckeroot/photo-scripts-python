@@ -165,7 +165,8 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   rawpy produit une image BT.709 en 16-bit, puis la courbe DCP "Camera Standard" est
   appliquée par-dessus comme rehaussement de contraste/couleur (pas en remplacement du gamma).
   Luminosité Phase 1 seule : mean=101.8 vs caméra=104.6 sur IMG_2378 (diff: 2.8).
-  Avec Phase 2 (LUT + compensation) : mean=104.2 vs 104.6 (diff: 0.4 — quasi parfait).
+  Avec Phases 2+3 (LUT S+V + ProPhoto + compensation + ColorMatrix) : mean=102.9 vs 104.6
+  (diff: 1.7). G/R=0.7388 vs caméra 0.6881 (erreur 7.4%, amélioré de 15.3% avec Phase 2 v1).
   - Sortie AVIF 10-bit via `imagecodecs.avif_encode(bitspersample=10)` pour préserver les
     nuances dans les dégradés (Pillow ne supporte que 8-bit)
   - Auto-détection du profil dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`
@@ -203,9 +204,19 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   Résultat : mean=104.2 vs caméra=104.6 (diff: 0.4 — quasi parfait).
 
   Corrections retenues :
-  - H correction : additive (degrés) — H_new = H + ΔH
+  - H correction : additive, **atténuée par h_scale** (défaut 0.0) — H_new = H + ΔH × h_scale
   - S correction : multiplicative — S_new = S × ΔS
   - V correction : multiplicative — V_new = V × ΔV
+
+  **Atténuation de la correction de teinte (h_scale=0.0)** : les corrections ΔH du LUT sont
+  calibrées pour le pipeline DNG complet (demosaïçage → ForwardMatrix → ProPhoto). Notre
+  pipeline (rawpy → sRGB → ProPhoto) produit des teintes de départ légèrement différentes,
+  ce qui fait que les corrections ΔH surcorrigent et augmentent le ratio G/R au lieu de
+  l'améliorer. Tests empiriques sur 3 images (tungstène 3500-3700K) :
+  - h_scale=1.0 (full H) : erreur G/R = 8-15% par rapport au JPEG caméra
+  - h_scale=0.0 (skip H) : erreur G/R = 1-7% — **meilleur dans tous les cas**
+  Les corrections S et V restent pleinement appliquées (améliorent le canal B et les
+  ombres sans dégrader le ratio G/R).
 
   Tests unitaires : `photo_sorter/test_dcp_phase2.py` — RGB↔HSV round-trip, trilinéaire,
   LUT application, intégration Phase 1+2.

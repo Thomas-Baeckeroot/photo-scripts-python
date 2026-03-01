@@ -650,7 +650,7 @@ def _hsv_to_rgb(hsv):
     return rgb
 
 
-def apply_lookup_table_to_hsv(hsv, lut):
+def apply_lookup_table_to_hsv(hsv, lut, h_scale=0.0):
     """
     Apply 3D HSV lookup table with trilinear interpolation.
 
@@ -658,9 +658,26 @@ def apply_lookup_table_to_hsv(hsv, lut):
     interpolation across the 8 corner voxels, and applies the corrected
     delta values (ΔH, ΔS, ΔV).
 
+    **Hue correction scaling (h_scale)**: The LUT's ΔH corrections are designed
+    for the DNG pipeline's specific color-to-ProPhoto conversion path (using the
+    ForwardMatrix). Our pipeline uses a different path (rawpy→sRGB→ProPhoto) which
+    produces slightly different starting hues. Applying the full ΔH overcorrects,
+    consistently increasing the G/R ratio above the camera target.
+
+    Empirical testing on multiple images (tungsten 3500-3700K) shows h_scale=0.0
+    (skip hue corrections entirely) produces the best G/R match to camera JPEG:
+      - IMG_2378: G/R error drops from 15.3% (h_scale=1.0) to 6.8% (h_scale=0.0)
+      - IMG_0001: G/R error drops from 8.8% to 1.0%
+
+    The S and V corrections remain fully applied as they improve color accuracy
+    (especially blue/shadow channels) without degrading the G/R balance.
+
     Args:
-        hsv: (H, W, 3) array with H in [0, 360), S, V in [0, 1].
-        lut: (90, 16, 16, 3) array of HSV correction deltas.
+        hsv:     (H, W, 3) array with H in [0, 360), S, V in [0, 1].
+        lut:     (90, 16, 16, 3) array of HSV correction deltas.
+        h_scale: Scale factor for hue corrections (0.0 = skip H, 1.0 = full H).
+                 Default 0.0 because our pipeline's ProPhoto starting hues differ
+                 from the DNG pipeline's, causing the ΔH corrections to overcorrect.
 
     Returns:
         (H, W, 3) array with corrected HSV values, clipped to valid ranges.
@@ -718,9 +735,9 @@ def apply_lookup_table_to_hsv(hsv, lut):
     delta = (1 - v_frac[..., np.newaxis]) * c0 + v_frac[..., np.newaxis] * c1
 
     # Apply corrections to HSV
-    # Note: Hue correction is additive (degrees), while S/V corrections are multiplicative
-    # (per Adobe DCP spec: dH added to H, dS multiplied by S, dV multiplied by V)
-    h_corrected = h + delta[..., 0]
+    # Hue correction is additive (degrees), scaled by h_scale (default 0.0 to skip).
+    # S/V corrections are multiplicative (per Adobe DCP spec).
+    h_corrected = h + delta[..., 0] * h_scale
     s_corrected = s * delta[..., 1]
     v_corrected = v * delta[..., 2]
 
