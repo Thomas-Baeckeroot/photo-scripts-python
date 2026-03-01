@@ -106,6 +106,7 @@ def extract_image_metadata(photo_folder, files):
     EXIF_EXPOSURE_TIME = 'ExposureTime'
     EXIF_GPS_INFO = 'GPSInfo'
     EXIF_PICTURE_STYLE = 'PictureStyle'
+    EXIF_COLOR_TEMPERATURE = 'ColorTemperature'
 
     for file in files:
         # Only process files that are images (RAW or processed)
@@ -144,11 +145,21 @@ def extract_image_metadata(photo_folder, files):
             if EXIF_PICTURE_STYLE in exif:
                 file.picture_style = exif[EXIF_PICTURE_STYLE]
 
+            # Extract color temperature (for illuminant-correct color rendering, Phase 3)
+            if EXIF_COLOR_TEMPERATURE in exif:
+                try:
+                    file.color_temperature = int(exif[EXIF_COLOR_TEMPERATURE])
+                except (ValueError, TypeError):
+                    log.warning(f"Invalid ColorTemperature in "
+                                f"{file.original_filename}: "
+                                f"{exif[EXIF_COLOR_TEMPERATURE]}")
+
             log.debug(f"File '{file.original_filename}': "
                       f"timestamp={file.timestamp}; "
                       f"exposure={file.exposure_time}; "
                       f"has GPS info = {file.has_gps}; "
-                      f"picture style = {file.picture_style}")
+                      f"picture style = {file.picture_style}; "
+                      f"color temp = {file.color_temperature}")
         else:
             log.debug(f"File '{file.original_filename}' "
                       f"not identified as image (=> not checking EXIF data for timestamp, exposure time, or GPS info).")

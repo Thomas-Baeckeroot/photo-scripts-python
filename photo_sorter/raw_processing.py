@@ -22,6 +22,9 @@ from photo_sorter.config import AppConfig
 from photo_sorter.constants import DEFAULT_DCP_PROFILE_DIR
 from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
                                        apply_lookup_table, parse_dcp_lookup_table,
+                                       apply_color_correction,
+                                       compute_color_correction_matrix,
+                                       parse_dcp_color_matrices,
                                        DcpProfileCache)
 from photo_sorter.display import log_title
 
@@ -37,7 +40,8 @@ COLORSPACE_MAP = {
 
 def develop_raw(raw_file_path, output_path, output_format="avif",
                 output_bps=8, output_colorspace="srgb",
-                dark_frame_path=None, tone_curve=None, lookup_table=None):
+                dark_frame_path=None, tone_curve=None, lookup_table=None,
+                color_correction_matrix=None):
     """
     Develop a RAW file using rawpy (Python binding for libraw).
 
@@ -51,10 +55,11 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         3. Demosaic with AHD algorithm (same as dcraw -q 3)
         4. Apply camera white balance
         5. Convert to target colorspace with BT.709 gamma
-        6. Optionally apply DCP tone curve (Phase 1) as contrast/color enhancement
+        6. Optionally apply Phase 3 color correction (illuminant-interpolated ColorMatrix)
         7. Optionally apply DCP 3D LookTable (Phase 2) for fine-grained HSV corrections
-        8. Downsample to requested bit depth (10-bit for AVIF, 16-bit for TIFF)
-        9. Save as AVIF (imagecodecs for 10-bit, Pillow for 8-bit) or TIFF
+        8. Optionally apply DCP tone curve (Phase 1) as contrast/color enhancement
+        9. Downsample to requested bit depth (10-bit for AVIF, 16-bit for TIFF)
+       10. Save as AVIF (imagecodecs for 10-bit, Pillow for 8-bit) or TIFF
 
     Args:
         raw_file_path:      Full path to the RAW file (.CR3, .CR2, .NEF, etc.)
@@ -73,9 +78,13 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                             - this "DCP on BT.709" approach matches camera JPEG brightness
                             - result is then downsampled to the requested bit depth
         lookup_table:       Optional (90, 16, 16, 3) numpy array of HSV corrections
-                            (from dcp_profile.parse_dcp_lookup_table). Applied AFTER
+                            (from dcp_profile.parse_dcp_lookup_table). Applied BEFORE
                             tone curve via trilinear interpolation in HSV space.
                             Only used for AVIF output (not TIFF)
+        color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
+                            correction. Compensates for rawpy using D65-only ColorMatrix
+                            when the scene illuminant is non-D65 (e.g. tungsten 3700K).
+                            Applied in linear sRGB space. None at D65 (no correction needed).
 
     Returns:
         True if the image was created successfully, False otherwise.
@@ -84,7 +93,8 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     log.debug(f" ┊                 → '{output_path}'")
     log.debug(f" ┊                 (format={output_format}, bps={output_bps}, "
               f"colorspace={output_colorspace}, "
-              f"tone_curve={'yes' if tone_curve is not None else 'no'})")
+              f"tone_curve={'yes' if tone_curve is not None else 'no'}, "
+              f"ccm={'yes' if color_correction_matrix is not None else 'no'})")
 
     colorspace = COLORSPACE_MAP.get(output_colorspace)
     if colorspace is None:
@@ -148,10 +158,19 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         # Since rawpy outputs BT.709-encoded data, we linearize (invert BT.709 gamma)
         # before the LUT, then re-encode BT.709 for the ToneCurve.
 
-        # Phase 2: Apply DCP 3D LookTable in linear space (before tone curve)
+        # Phase 3 + Phase 2: Apply in linear sRGB space (before tone curve).
+        # Phase 3 (color correction matrix) is applied inside apply_lookup_table()
+        # when a LUT is present, or standalone via apply_color_correction() otherwise.
+        # Both operations happen in linear sRGB space (BT.709 linearized).
         if tone_curve is not None and lookup_table is not None:
-            rgb = apply_lookup_table(rgb, lookup_table, linearize_bt709=True)
-            log.debug(f" ┊                 After lookup table (linear): {rgb.shape}, dtype={rgb.dtype}")
+            rgb = apply_lookup_table(rgb, lookup_table, linearize_bt709=True,
+                                     color_correction_matrix=color_correction_matrix)
+            log.debug(f" ┊                 After Phase 3+2 (linear): {rgb.shape}, dtype={rgb.dtype}")
+        elif tone_curve is not None and color_correction_matrix is not None:
+            # Phase 3 only (no LUT): apply color correction standalone
+            rgb = apply_color_correction(rgb, color_correction_matrix,
+                                         linearize_bt709=True)
+            log.debug(f" ┊                 After Phase 3 (standalone): {rgb.shape}, dtype={rgb.dtype}")
 
         # Phase 1: Apply DCP tone curve as contrast/color enhancement on BT.709 data.
         # The S-curve adds depth and saturation matching the camera manufacturer's
@@ -242,7 +261,8 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config):
 
 
 def create_avif_from_raw_file(photo_folder, file_entry, app_config,
-                             tone_curve=None, lookup_table=None):
+                             tone_curve=None, lookup_table=None,
+                             color_correction_matrix=None):
     """
     Create an AVIF image from a RAW file for individual images (not in groups).
 
@@ -250,6 +270,8 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config,
     With DCP tone curve alone: 10-bit sRGB AVIF via imagecodecs, with the camera
     manufacturer's contrast curve applied on top of BT.709.
     With DCP tone curve + lookup table: 10-bit sRGB AVIF with Phase 2 HSV corrections.
+    With color correction matrix (Phase 3): illuminant-based ColorMatrix correction
+    for non-D65 scene lighting (e.g. tungsten). Applied in linear sRGB before Phase 2.
 
     Args:
         photo_folder (str): Base photo folder path
@@ -257,6 +279,8 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config,
         app_config (AppConfig): Application configuration (reads dark_frame_path)
         tone_curve: Optional Nx2 numpy array of DCP tone curve control points (Phase 1)
         lookup_table: Optional (90, 16, 16, 3) numpy array of HSV corrections (Phase 2)
+        color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
+                                 correction. None for D65 (daylight) scenes.
 
     Returns:
         ImageFile: Updated file entry with processed file info
@@ -275,6 +299,7 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config,
         dark_frame_path=app_config.dark_frame_path,
         tone_curve=tone_curve,
         lookup_table=lookup_table,
+        color_correction_matrix=color_correction_matrix,
     )
 
     if success:
@@ -309,11 +334,13 @@ def create_processed_images(photo_folder, files, app_config):
     if app_config.dcp_profile_path:
         tone_curve = parse_dcp_tone_curve(app_config.dcp_profile_path)
         lookup_table = None
+        cm1, cm2, temp1, temp2 = None, None, None, None
         if tone_curve is None:
             log.warning(" ├→ DCP profile configured but tone curve could not be loaded. "
                         "Falling back to BT.709 gamma.")
         else:
             lookup_table = parse_dcp_lookup_table(app_config.dcp_profile_path)
+            cm1, cm2, temp1, temp2 = parse_dcp_color_matrices(app_config.dcp_profile_path)
 
         for file_entry in files:
             if file_entry.raw_filename and not file_entry.processed_filename:
@@ -322,10 +349,22 @@ def create_processed_images(photo_folder, files, app_config):
                               f"for group '{file_entry.group_id}'")
                     file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
                 else:
+                    # Phase 3: compute per-image color correction from scene temperature
+                    ccm = None
+                    if (cm1 is not None and cm2 is not None
+                            and temp1 is not None and temp2 is not None
+                            and file_entry.color_temperature is not None):
+                        ccm = compute_color_correction_matrix(
+                            cm1, cm2, temp1, temp2,
+                            file_entry.color_temperature)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
-                              f"for individual image")
+                              f"for individual image "
+                              f"(color_temp={file_entry.color_temperature}K, "
+                              f"ccm={'yes' if ccm is not None else 'no'})")
                     create_avif_from_raw_file(photo_folder, file_entry, app_config,
-                                             tone_curve=tone_curve, lookup_table=lookup_table)
+                                             tone_curve=tone_curve,
+                                             lookup_table=lookup_table,
+                                             color_correction_matrix=ccm)
 
     # Mode 2: Auto-detect → per-image DCP profile based on EXIF PictureStyle
     elif os.path.isdir(DEFAULT_DCP_PROFILE_DIR):
@@ -340,11 +379,22 @@ def create_processed_images(photo_folder, files, app_config):
                     file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
                 else:
                     style = file_entry.picture_style or "Standard"
-                    tone_curve, lookup_table = dcp_cache.get(style)
+                    tc, lut, cm1, cm2, temp1, temp2 = dcp_cache.get(style)
+                    # Phase 3: compute per-image color correction from scene temperature
+                    ccm = None
+                    if (cm1 is not None and cm2 is not None
+                            and temp1 is not None and temp2 is not None
+                            and file_entry.color_temperature is not None):
+                        ccm = compute_color_correction_matrix(
+                            cm1, cm2, temp1, temp2,
+                            file_entry.color_temperature)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
-                              f"(PictureStyle='{style}')")
+                              f"(PictureStyle='{style}', "
+                              f"color_temp={file_entry.color_temperature}K, "
+                              f"ccm={'yes' if ccm is not None else 'no'})")
                     create_avif_from_raw_file(photo_folder, file_entry, app_config,
-                                             tone_curve=tone_curve, lookup_table=lookup_table)
+                                             tone_curve=tc, lookup_table=lut,
+                                             color_correction_matrix=ccm)
 
     # Mode 3: No DCP available → BT.709 only (no tone curve, no LUT)
     else:

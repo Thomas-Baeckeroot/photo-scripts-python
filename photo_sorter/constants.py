@@ -35,5 +35,17 @@ DEFAULT_DCP_PROFILE_PATH = (
     DEFAULT_DCP_PROFILE_DIR + "Canon EOS R7 Camera Standard.dcp"
 )
 
+# DNG CalibrationIlluminant code → approximate correlated color temperature (Kelvin).
+# From EXIF LightSource enum (used by the DNG specification for CalibrationIlluminant tags).
+ILLUMINANT_TEMP = {
+    17: 2856,   # Standard Light A (tungsten)
+    18: 4874,   # Standard Light B (direct sunlight)
+    19: 6774,   # Standard Light C (overcast)
+    20: 5503,   # D55
+    21: 6504,   # D65
+    22: 7504,   # D75
+    23: 5003,   # D50
+}
+
 # ANSI escape code for error messages
 ERROR = '\033[1;31mError:\033[0m '

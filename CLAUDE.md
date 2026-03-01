@@ -119,6 +119,7 @@ class ImageFile:
     group_id: Optional[str]          # ID groupe (panorama/HDR)
     group_type: Optional[str]        # Type: panorama, hdr, focus, burst
     picture_style: Optional[str]     # Canon PictureStyle (Standard, Portrait, ...)
+    color_temperature: Optional[int] # Température couleur (Kelvin) depuis EXIF
 ```
 
 ## Constantes importantes
@@ -215,6 +216,45 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
     - Config explicite (`dcp_profile = /path`) → un profil pour toutes les images
     - Auto-detect (config vide) → **per-image par PictureStyle** (nouveau)
     - Pas de DCP disponible → BT.709 seul
+
+- [x] **Couleurs fades — Phase 3 : Interpolation ColorMatrix par température de couleur**
+  Implémenté dans `dcp_profile.py` + `raw_processing.py` + `metadata.py` + `constants.py` + `models.py`.
+
+  **Problème** : rawpy/libraw utilise uniquement la ColorMatrix2 (calibrée D65, 6504K)
+  quelle que soit la lumière de la scène. Sous éclairage tungstène (3000-4000K), la matrice
+  correcte est une interpolation pondérée en mireds entre CM1 (Illuminant A, 2856K) et CM2.
+  L'utilisation de CM2 seul introduit une teinte verte sous lumière chaude.
+
+  **Approche** : Correction post-demosaicing via matrice 3×3 appliquée en sRGB linéaire.
+  - `Correction = M_xyz2srgb × CM_interp⁻¹ × CM2 × M_srgb2xyz`
+  - `CM_interp = w1 × CM1 + (1 - w1) × CM2` avec `w1` calculé sur l'échelle mireds
+  - À D65 : `w1 ≈ 0 → Correction = Identity → None` (pas de correction pour lumière du jour)
+  - À 3700K : correction R+3%, B+9%, G quasi inchangé (via termes hors-diagonale)
+
+  **Ordre de traitement** dans `develop_raw()` :
+  1. rawpy → BT.709 16-bit
+  2. **Phase 3** : linéarisation BT.709 → matrice 3×3 → clip [0, 1]
+  3. **Phase 2** : LookTable HSV (dans le même espace linéaire)
+  4. Ré-encodage BT.709
+  5. **Phase 1** : ToneCurve
+
+  **Fichiers modifiés** :
+  - `constants.py` : `ILLUMINANT_TEMP` — dict code DNG → Kelvin (17→2856K, 21→6504K, etc.)
+  - `models.py` : `ImageFile.color_temperature` (Optional[int])
+  - `metadata.py` : extraction du tag EXIF `ColorTemperature`
+  - `dcp_profile.py` : `_parse_rational_matrix()`, `parse_dcp_color_matrices()`,
+    `compute_color_correction_matrix()`, `apply_color_correction()`.
+    Matrices standard `M_SRGB_TO_XYZ` / `M_XYZ_TO_SRGB` (IEC 61966-2-1).
+    `apply_lookup_table()` accepte `color_correction_matrix` (appliquée avant HSV).
+    `load_dcp_profile()` retourne 6-tuple `(tc, lut, cm1, cm2, temp1, temp2)`.
+    `DcpProfileCache.get()` retourne le même 6-tuple.
+  - `raw_processing.py` : `develop_raw()` et `create_avif_from_raw_file()` acceptent
+    `color_correction_matrix`. `create_processed_images()` calcule la correction per-image
+    dans Mode 1 (explicite) et Mode 2 (auto-detect per PictureStyle).
+
+  **Note** : le DCP Canon EOS R7 ne contient pas de HueSatMap (tags 50937-50939)
+  ni de ForwardMatrix illuminant-dépendante (FM1 = FM2). La correction ColorMatrix
+  est donc la seule correction illuminant-dépendante disponible depuis le profil DCP.
 
 - [ ] **Mettre à jour `has_gps` après géotagging**
   - Dans la liste des fichiers, l'attribut `gps` reste à `no` après ajout des infos GPS

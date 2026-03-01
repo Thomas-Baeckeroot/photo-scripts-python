@@ -35,6 +35,219 @@ log = logging.getLogger(__name__)
 TAG_PROFILE_NAME = 50936
 TAG_PROFILE_TONE_CURVE = 50940
 TAG_PROFILE_LOOKUP_TABLE = 50982
+TAG_COLOR_MATRIX_1 = 50721
+TAG_COLOR_MATRIX_2 = 50722
+TAG_CALIBRATION_ILLUMINANT_1 = 50778
+TAG_CALIBRATION_ILLUMINANT_2 = 50779
+
+# Standard sRGB ↔ CIE XYZ D65 matrices (IEC 61966-2-1).
+# Used for Phase 3 color correction matrix computation.
+M_SRGB_TO_XYZ = np.array([
+    [0.4124564, 0.3575761, 0.1804375],
+    [0.2126729, 0.7151522, 0.0721750],
+    [0.0193339, 0.1191920, 0.9503041],
+], dtype=np.float64)
+
+M_XYZ_TO_SRGB = np.array([
+    [ 3.2404542, -1.5371385, -0.4985314],
+    [-0.9692660,  1.8760108,  0.0415560],
+    [ 0.0556434, -0.2040259,  1.0572252],
+], dtype=np.float64)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 3: ColorMatrix parsing and illuminant-based color correction
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _parse_rational_matrix(page, tag_code, tag_name):
+    """
+    Parse a 3×3 matrix stored as rational pairs in a TIFF tag.
+
+    DCP stores matrices as flat tuples of 18 values:
+        (num0, den0, num1, den1, ..., num8, den8)
+    Each (num, den) pair represents one matrix element = num / den.
+
+    Args:
+        page:     tifffile page object.
+        tag_code: TIFF tag number.
+        tag_name: Human-readable name for logging.
+
+    Returns:
+        numpy (3, 3) float64 array, or None if tag is missing/invalid.
+    """
+    if tag_code not in page.tags:
+        log.debug(f" ┊      No {tag_name} (tag {tag_code}) in DCP file")
+        return None
+
+    raw = page.tags[tag_code].value
+    if len(raw) != 18:
+        log.error(f" ┊      Invalid {tag_name}: expected 18 values "
+                  f"(9 rational pairs), got {len(raw)}")
+        return None
+
+    # Convert rational pairs to floats: (num0/den0, num1/den1, ...)
+    floats = [raw[i] / raw[i + 1] for i in range(0, 18, 2)]
+    return np.array(floats, dtype=np.float64).reshape(3, 3)
+
+
+def parse_dcp_color_matrices(dcp_path):
+    """
+    Extract ColorMatrix1, ColorMatrix2, and calibration illuminant temperatures
+    from a DCP file.
+
+    Each ColorMatrix maps CIE XYZ coordinates to camera-native RGB:
+        CM × XYZ = Camera_RGB   (DNG convention)
+
+    CalibrationIlluminant1/2 are EXIF LightSource enum codes resolved to
+    approximate correlated color temperatures via ILLUMINANT_TEMP.
+
+    Args:
+        dcp_path: Absolute path to the .dcp file.
+
+    Returns:
+        Tuple (cm1, cm2, temp1, temp2) where:
+            cm1:   numpy (3, 3) ColorMatrix1 (warm illuminant), or None
+            cm2:   numpy (3, 3) ColorMatrix2 (D65), or None
+            temp1: int, color temperature for Illuminant 1 (Kelvin), or None
+            temp2: int, color temperature for Illuminant 2 (Kelvin), or None
+        Returns (None, None, None, None) if matrices cannot be parsed.
+    """
+    from photo_sorter.constants import ILLUMINANT_TEMP
+
+    try:
+        with tifffile.TiffFile(dcp_path) as tif:
+            page = tif.pages[0]
+
+            # Parse calibration illuminant temperatures
+            temp1 = None
+            temp2 = None
+            if TAG_CALIBRATION_ILLUMINANT_1 in page.tags:
+                illum_code = page.tags[TAG_CALIBRATION_ILLUMINANT_1].value
+                temp1 = ILLUMINANT_TEMP.get(illum_code)
+                if temp1 is None:
+                    log.warning(f" ┊      Unknown CalibrationIlluminant1 "
+                                f"code: {illum_code}")
+            if TAG_CALIBRATION_ILLUMINANT_2 in page.tags:
+                illum_code = page.tags[TAG_CALIBRATION_ILLUMINANT_2].value
+                temp2 = ILLUMINANT_TEMP.get(illum_code)
+                if temp2 is None:
+                    log.warning(f" ┊      Unknown CalibrationIlluminant2 "
+                                f"code: {illum_code}")
+
+            # Parse ColorMatrix1 (warm illuminant) and ColorMatrix2 (D65)
+            cm1 = _parse_rational_matrix(page, TAG_COLOR_MATRIX_1,
+                                         "ColorMatrix1")
+            cm2 = _parse_rational_matrix(page, TAG_COLOR_MATRIX_2,
+                                         "ColorMatrix2")
+
+            if cm1 is not None and cm2 is not None:
+                log.debug(f" ┊      Color matrices loaded: "
+                          f"CM1 ({temp1}K), CM2 ({temp2}K)")
+
+            return cm1, cm2, temp1, temp2
+
+    except Exception as e:
+        log.error(f" ┊      Failed to read color matrices from "
+                  f"'{dcp_path}': {e}")
+        return None, None, None, None
+
+
+def compute_color_correction_matrix(cm1, cm2, temp1, temp2, scene_temp):
+    """
+    Compute a 3×3 color correction matrix for a given scene color temperature.
+
+    The correction compensates for rawpy/libraw always using CM2 (D65)
+    internally. Under non-D65 illuminants, the correct ColorMatrix is a
+    mired-weighted interpolation of CM1 and CM2. The correction converts
+    from the CM2-based rendering to the interpolated-matrix rendering.
+
+    Math:
+        CM_interp = w1 × CM1 + (1 - w1) × CM2    (mired interpolation)
+        Correction = M_xyz2srgb @ inv(CM_interp) @ CM2 @ M_srgb2xyz
+
+    When scene_temp ≈ D65: w1 ≈ 0 → CM_interp = CM2 → Correction = Identity.
+
+    Args:
+        cm1:        numpy (3, 3) ColorMatrix1 (warm illuminant).
+        cm2:        numpy (3, 3) ColorMatrix2 (D65).
+        temp1:      int, color temperature for CM1 (Kelvin), e.g. 2856.
+        temp2:      int, color temperature for CM2 (Kelvin), e.g. 6504.
+        scene_temp: int, scene color temperature (Kelvin) from EXIF.
+
+    Returns:
+        numpy (3, 3) float64 correction matrix for linear sRGB,
+        or None if correction is near-identity (scene close to D65).
+    """
+    # Compute mired interpolation weight
+    mired_scene = 1e6 / scene_temp
+    mired_temp1 = 1e6 / temp1
+    mired_temp2 = 1e6 / temp2
+
+    w1 = (mired_scene - mired_temp2) / (mired_temp1 - mired_temp2)
+    w1 = max(0.0, min(1.0, w1))
+
+    # If weight is near zero, scene is close to D65 → no correction needed
+    if w1 < 0.001:
+        log.debug(f" ┊      Color correction: scene {scene_temp}K ≈ D65, "
+                  f"skipping (w1={w1:.4f})")
+        return None
+
+    # Interpolate color matrix
+    cm_interp = w1 * cm1 + (1.0 - w1) * cm2
+
+    # Correction = M_xyz2srgb @ CM_interp⁻¹ @ CM2 @ M_srgb2xyz
+    cm_interp_inv = np.linalg.inv(cm_interp)
+    correction = M_XYZ_TO_SRGB @ cm_interp_inv @ cm2 @ M_SRGB_TO_XYZ
+
+    log.debug(f" ┊      Color correction for {scene_temp}K "
+              f"(w1={w1:.4f}, mired={mired_scene:.1f}): "
+              f"diag=[{correction[0,0]:.4f}, {correction[1,1]:.4f}, "
+              f"{correction[2,2]:.4f}]")
+
+    return correction
+
+
+def apply_color_correction(rgb, correction_matrix, linearize_bt709=False):
+    """
+    Apply a 3×3 color correction matrix to an RGB image (standalone).
+
+    Used when Phase 3 correction is needed but no LookTable (Phase 2) is
+    available. Handles linearization/re-encoding internally.
+
+    The matrix multiply: pixel_out = correction_matrix @ pixel_in
+    where pixel_in/pixel_out are (3,) vectors in linear sRGB.
+
+    Args:
+        rgb:                (H, W, 3) numpy array, dtype uint8 or uint16.
+        correction_matrix:  (3, 3) numpy float64 array.
+        linearize_bt709:    If True, invert BT.709 before and re-encode after.
+
+    Returns:
+        (H, W, 3) array, same dtype as input, with correction applied.
+    """
+    if rgb.dtype == np.uint8:
+        max_val = 255.0
+    elif rgb.dtype == np.uint16:
+        max_val = 65535.0
+    else:
+        log.error(f" ┊      Unsupported dtype for color correction: {rgb.dtype}")
+        return rgb
+
+    original_dtype = rgb.dtype
+    rgb_norm = rgb.astype(np.float64) / max_val
+
+    if linearize_bt709:
+        rgb_norm = _bt709_linearize(rgb_norm)
+
+    # Apply 3×3 matrix: 'ij,hwj->hwi' = matrix[i,j] × pixel[h,w,j] → result[h,w,i]
+    rgb_corrected = np.einsum('ij,hwj->hwi', correction_matrix, rgb_norm)
+    rgb_corrected = np.clip(rgb_corrected, 0.0, 1.0)
+
+    if linearize_bt709:
+        rgb_corrected = _bt709_encode(rgb_corrected)
+
+    rgb_out = np.clip(rgb_corrected * max_val, 0, max_val)
+    return rgb_out.astype(original_dtype)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -75,19 +288,24 @@ def resolve_dcp_path(picture_style, dcp_dir):
 
 def load_dcp_profile(dcp_path):
     """
-    Load both tone curve and lookup table from a DCP file.
+    Load tone curve, lookup table, and color matrices from a DCP file.
 
     Args:
         dcp_path: Absolute path to the .dcp file.
 
     Returns:
-        Tuple (tone_curve, lookup_table) where each is a numpy array or None.
+        Tuple (tone_curve, lookup_table, cm1, cm2, temp1, temp2) where:
+            tone_curve:    Nx2 numpy array or None
+            lookup_table:  (90, 16, 16, 3) numpy array or None
+            cm1, cm2:      (3, 3) numpy arrays or None
+            temp1, temp2:  int (Kelvin) or None
     """
     tone_curve = parse_dcp_tone_curve(dcp_path)
     lookup_table = None
     if tone_curve is not None:
         lookup_table = parse_dcp_lookup_table(dcp_path)
-    return tone_curve, lookup_table
+    cm1, cm2, temp1, temp2 = parse_dcp_color_matrices(dcp_path)
+    return tone_curve, lookup_table, cm1, cm2, temp1, temp2
 
 
 class DcpProfileCache:
@@ -95,31 +313,36 @@ class DcpProfileCache:
     Lazy-loading cache for parsed DCP profiles, keyed by PictureStyle name.
 
     Each style's DCP is read from disk only once, then cached as a
-    (tone_curve, lookup_table) tuple. This avoids re-parsing the same
-    TIFF file for every image in a batch that shares the same style.
+    (tone_curve, lookup_table, cm1, cm2, temp1, temp2) tuple.
+    This avoids re-parsing the same TIFF file for every image in a
+    batch that shares the same style.
     """
 
     def __init__(self, dcp_dir):
         self._dcp_dir = dcp_dir
-        self._cache = {}  # {style_name: (tone_curve, lookup_table)}
+        self._cache = {}  # {style_name: (tc, lut, cm1, cm2, temp1, temp2)}
 
     def get(self, picture_style):
         """
-        Return (tone_curve, lookup_table) for the given PictureStyle.
+        Return (tone_curve, lookup_table, cm1, cm2, temp1, temp2)
+        for the given PictureStyle.
 
-        Loads and caches the profile on first access. Returns (None, None)
-        if the profile cannot be found or parsed.
+        Loads and caches the profile on first access. Returns a tuple
+        of Nones if the profile cannot be found or parsed.
         """
         if picture_style not in self._cache:
             dcp_path = resolve_dcp_path(picture_style, self._dcp_dir)
             if dcp_path:
-                tc, lut = load_dcp_profile(dcp_path)
-                self._cache[picture_style] = (tc, lut)
-                log.info(f" ┊      Loaded DCP profile for PictureStyle '{picture_style}' "
+                result = load_dcp_profile(dcp_path)
+                self._cache[picture_style] = result
+                tc, lut, cm1 = result[0], result[1], result[2]
+                log.info(f" ┊      Loaded DCP profile for PictureStyle "
+                         f"'{picture_style}' "
                          f"(tone_curve={'yes' if tc is not None else 'no'}, "
-                         f"lookup_table={'yes' if lut is not None else 'no'})")
+                         f"lookup_table={'yes' if lut is not None else 'no'}, "
+                         f"color_matrices={'yes' if cm1 is not None else 'no'})")
             else:
-                self._cache[picture_style] = (None, None)
+                self._cache[picture_style] = (None, None, None, None, None, None)
         return self._cache[picture_style]
 
 
@@ -525,24 +748,32 @@ def _bt709_encode(rgb_linear):
     )
 
 
-def apply_lookup_table(rgb, lut, linearize_bt709=False):
+def apply_lookup_table(rgb, lut, linearize_bt709=False,
+                       color_correction_matrix=None):
     """
     Apply 3D HSV lookup table to an RGB image.
 
     Orchestrates the complete process:
         1. Normalize RGB from [0, max] to [0, 1]
         2. Optionally linearize (invert BT.709 gamma) for correct LUT domain
-        3. Convert RGB → HSV
-        4. Apply trilinear LUT interpolation
-        5. Convert HSV → RGB
-        6. Compensate mean brightness shift from saturation corrections
-        7. Optionally re-encode BT.709 gamma
-        8. Denormalize RGB back to original range and clamp
+        3. Optionally apply Phase 3 color correction matrix (in linear sRGB)
+        4. Convert RGB → HSV
+        5. Apply trilinear LUT interpolation
+        6. Convert HSV → RGB
+        7. Compensate mean brightness shift from saturation corrections
+        8. Optionally re-encode BT.709 gamma
+        9. Denormalize RGB back to original range and clamp
 
     Per the DNG specification, the ProfileLookTableData is designed to operate
     on linear RGB data (in RIMM/ProPhoto primaries). When `linearize_bt709=True`,
     the BT.709 gamma is inverted before HSV conversion and re-applied after,
     so the LUT corrections happen in the correct linear domain.
+
+    **Phase 3 color correction**: When `color_correction_matrix` is provided,
+    it is applied in linear sRGB space (after linearization, before HSV conversion).
+    This corrects for rawpy/libraw's D65-only ColorMatrix under non-D65 illuminants
+    (e.g., tungsten at 3700K). At D65, the matrix is None (identity), so daylight
+    images are unaffected.
 
     **Brightness compensation**: The LUT's saturation corrections (desaturation)
     increase apparent RGB luminance after HSV→RGB conversion, because lower
@@ -557,6 +788,8 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False):
         lut: (90, 16, 16, 3) lookup table from parse_dcp_lookup_table().
         linearize_bt709: If True, invert BT.709 gamma before LUT application
                          and re-encode after. Required when input is BT.709-encoded.
+        color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
+                                 correction. Applied in linear sRGB before HSV conversion.
 
     Returns:
         (H, W, 3) array, same dtype as input, with LUT corrections applied.
@@ -577,6 +810,15 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False):
     # Optionally linearize: invert BT.709 gamma to recover linear RGB
     if linearize_bt709:
         rgb_norm = _bt709_linearize(rgb_norm)
+
+    # Phase 3: Apply color correction matrix in linear sRGB space.
+    # This corrects for rawpy using only the D65 ColorMatrix (CM2) when the
+    # scene illuminant requires an interpolated matrix (CM1/CM2 blend).
+    # Must be applied before HSV conversion since the matrix operates on linear RGB.
+    if color_correction_matrix is not None:
+        rgb_norm = np.einsum('ij,hwj->hwi', color_correction_matrix, rgb_norm)
+        rgb_norm = np.clip(rgb_norm, 0.0, 1.0)
+        log.debug(" ┊      Phase 3 color correction applied (in linear sRGB)")
 
     # Record mean brightness before LUT for compensation
     mean_before = rgb_norm.mean()
