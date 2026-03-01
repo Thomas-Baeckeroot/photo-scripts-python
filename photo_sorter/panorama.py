@@ -219,10 +219,12 @@ def create_panorama_project(tiff_files, hfov):
         img = hsi.SrcPanoImage()
         img.setFilename(path)
 
-        # Try to read EXIF; fall back to tifffile for dimensions
+        # Read image dimensions. readEXIF() is used for size only —
+        # applyEXIFValues() is NOT called because it sets exposure compensation
+        # (EeV) from the original camera EXIF, which causes overexposed output
+        # on TIFFs already developed by rawpy.
         try:
             img.readEXIF()
-            img.applyEXIFValues()
         except RuntimeError:
             log.debug(f"readEXIF failed for '{os.path.basename(path)}', "
                       "reading dimensions with tifffile.")
@@ -420,11 +422,8 @@ def optimize_panorama(pano, pto_path):
     except Exception as e:
         log.warning(f"CenterHorizontally failed: {e}")
 
-    try:
-        hsi.StraightenPanorama(pano).runAlgorithm()
-        log.debug("StraightenPanorama applied.")
-    except Exception as e:
-        log.warning(f"StraightenPanorama failed: {e}")
+    # StraightenPanorama skipped — it pushes images to the pole when Exiv2
+    # cannot read orientation from the TIFFs (relative paths after PTO round-trip).
 
     try:
         hsi.FitPanorama(pano).runAlgorithm()
@@ -490,16 +489,9 @@ def configure_output(pano):
     except Exception as e:
         log.warning(f"CalculateOptimalScale failed: {e}")
 
-    # Optimal ROI (crop black borders)
-    # CalculateOptimalROI requires a ProgressDisplay* argument (pass None for null pointer)
-    try:
-        roi_calc = hsi.CalculateOptimalROI(pano, None)
-        roi_calc.runAlgorithm()
-        roi = roi_calc.getResultOptimalROI()
-        opts.setROI(roi)
-        log.info(f"Optimal ROI: {roi}")
-    except Exception as e:
-        log.warning(f"CalculateOptimalROI failed: {e}")
+    # CalculateOptimalROI requires an AppBase::ProgressDisplay* that cannot be safely
+    # constructed from Python (passing None segfaults the C++ layer). Skipped — enblend
+    # handles black-border blending automatically, and ROI crop is optional.
 
     # Output format: TIFF with enblend blending
     opts.outputFormat = hsi.PanoramaOptions.TIFF_m
