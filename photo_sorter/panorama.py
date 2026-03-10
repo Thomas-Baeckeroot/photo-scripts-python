@@ -12,7 +12,7 @@ Platform: Linux x86_64 only (hugin-tools package provides the hsi module).
 Functions:
     create_panorama()       — Main entry point: full pipeline from TIFFs to panorama
     check_prerequisites()   — Verify hsi and external tools are available
-    collect_tiff_files()    — Gather input TIFFs from a panorama folder
+    collect_panorama_images() — Gather input images (TIFFs or JPGs) from a panorama folder
     compute_hfov()          — Calculate horizontal field of view from focal length
     get_lens_parameters()   — Read focal length and crop factor from EXIF
     create_panorama_project() — Build an hsi.Panorama from TIFF files
@@ -82,29 +82,33 @@ def check_prerequisites():
 # File collection
 # ---------------------------------------------------------------------------
 
-def collect_tiff_files(pano_folder):
+def collect_panorama_images(pano_folder):
     """
-    Collect TIFF files from *pano_folder*, sorted alphabetically.
+    Collect image files from *pano_folder*, sorted alphabetically.
+
+    Looks for TIFFs first (16-bit from RAW processing). If none are found,
+    falls back to JPEGs (camera-generated, used as-is for stitching).
 
     Args:
-        pano_folder: Path to the panorama subfolder containing TIFFs.
+        pano_folder: Path to the panorama subfolder.
 
     Returns:
-        list[str]: Sorted list of absolute TIFF paths, or empty list on error.
+        list[str]: Sorted list of absolute image paths, or empty list on error.
     """
-    pattern = os.path.join(pano_folder, f"*{PANO_TIFF_EXTENSION}")
-    tiff_files = sorted(glob.glob(pattern))
+    # Try TIFFs first (best quality — 16-bit ProPhoto from RAW)
+    for pattern_ext in (PANO_TIFF_EXTENSION, '.jpg', '.jpeg', '.JPG', '.JPEG'):
+        pattern = os.path.join(pano_folder, f"*{pattern_ext}")
+        files = sorted(glob.glob(pattern))
+        if len(files) >= MIN_IMAGES_FOR_PANORAMA:
+            log.info(f"Found {len(files)} {pattern_ext.upper()} files "
+                     f"in '{pano_folder}':")
+            for f in files:
+                log.info(f"  {os.path.basename(f)}")
+            return files
 
-    if len(tiff_files) < MIN_IMAGES_FOR_PANORAMA:
-        log.error(f"Need at least {MIN_IMAGES_FOR_PANORAMA} TIFF files in "
-                  f"'{pano_folder}', found {len(tiff_files)}.")
-        return []
-
-    log.info(f"Found {len(tiff_files)} TIFF files in '{pano_folder}':")
-    for f in tiff_files:
-        log.info(f"  {os.path.basename(f)}")
-
-    return tiff_files
+    log.error(f"Need at least {MIN_IMAGES_FOR_PANORAMA} images (TIFF or JPG) "
+              f"in '{pano_folder}', found none.")
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -134,53 +138,72 @@ def compute_hfov(focal_length_mm, crop_factor):
     return hfov
 
 
-def get_lens_parameters(pano_folder, tiff_files):
+def _parse_focal_from_exif(exif):
     """
-    Read focal length and crop factor from the RAW file corresponding to the
-    first TIFF.  Falls back to defaults with a warning if EXIF is unavailable.
+    Extract focal length and crop factor from an exiftool dict.
 
-    Expects the RAW files to live in ``../RAW/`` relative to *pano_folder*.
+    Returns:
+        tuple[float|None, float|None]: (focal_length_mm, crop_factor)
+    """
+    focal_length = exif.get('FocalLength')
+    crop_factor = exif.get('ScaleFactor35efl')
+
+    # FocalLength may be a string like "150.0 mm"
+    if isinstance(focal_length, str):
+        focal_length = float(focal_length.split()[0])
+    elif focal_length is not None:
+        focal_length = float(focal_length)
+
+    if isinstance(crop_factor, str):
+        crop_factor = float(crop_factor.split()[0])
+    elif crop_factor is not None:
+        crop_factor = float(crop_factor)
+
+    return focal_length, crop_factor
+
+
+def get_lens_parameters(pano_folder, image_files):
+    """
+    Read focal length and crop factor from EXIF.
+
+    Tries reading EXIF from the image files themselves first (JPGs have full
+    EXIF, TIFFs may have it if copied from RAW). Falls back to looking for
+    the corresponding RAW file in ``../RAW/``.
 
     Args:
         pano_folder: Path to panorama subfolder.
-        tiff_files: List of TIFF paths (used to derive RAW filename).
+        image_files: List of image paths (TIFF or JPG).
 
     Returns:
         tuple[float, float]: (hfov_degrees, crop_factor)
     """
-    # Derive RAW path: IMG_0010.tiff → ../RAW/IMG_0010.cr3
-    raw_folder = os.path.join(os.path.dirname(pano_folder), "RAW")
-    tiff_basename = os.path.splitext(os.path.basename(tiff_files[0]))[0]
-
     focal_length = None
     crop_factor = None
 
-    # Try common RAW extensions
-    for ext in ('.cr3', '.cr2', '.nef', '.crw'):
-        raw_path = os.path.join(raw_folder, tiff_basename + ext)
-        if os.path.isfile(raw_path):
-            exif = get_exif_with_exiftool(raw_path)
-            focal_length = exif.get('FocalLength')
-            crop_factor = exif.get('ScaleFactor35efl')
+    # Try reading EXIF directly from the first image file
+    first_image = image_files[0]
+    exif = get_exif_with_exiftool(first_image)
+    focal_length, crop_factor = _parse_focal_from_exif(exif)
+    if focal_length:
+        log.info(f"EXIF from '{first_image}': "
+                 f"focal={focal_length}mm, crop={crop_factor}")
 
-            # FocalLength may be a string like "150.0 mm"
-            if isinstance(focal_length, str):
-                focal_length = float(focal_length.split()[0])
-            elif focal_length is not None:
-                focal_length = float(focal_length)
-
-            if isinstance(crop_factor, str):
-                crop_factor = float(crop_factor.split()[0])
-            elif crop_factor is not None:
-                crop_factor = float(crop_factor)
-
-            if focal_length:
-                log.info(f"EXIF from '{raw_path}': "
-                         f"focal={focal_length}mm, crop={crop_factor}")
-                break
+    # Fallback: try the corresponding RAW file in ../RAW/
+    if not focal_length:
+        raw_folder = os.path.join(os.path.dirname(pano_folder), "RAW")
+        img_basename = os.path.splitext(os.path.basename(first_image))[0]
+        for ext in ('.cr3', '.cr2', '.nef', '.crw'):
+            raw_path = os.path.join(raw_folder, img_basename + ext)
+            if os.path.isfile(raw_path):
+                exif = get_exif_with_exiftool(raw_path)
+                focal_length, crop_factor = _parse_focal_from_exif(exif)
+                if focal_length:
+                    log.info(f"EXIF from '{raw_path}': "
+                             f"focal={focal_length}mm, crop={crop_factor}")
+                    break
 
     if not focal_length:
-        log.warning(f"Could not read focal length from RAW in '{raw_folder}'. "
+        log.warning(f"Could not read focal length from images or RAW. "
                     f"Using defaults: HFOV={DEFAULT_HFOV}°")
         return DEFAULT_HFOV, DEFAULT_CROP_FACTOR
 
@@ -196,16 +219,16 @@ def get_lens_parameters(pano_folder, tiff_files):
 # Project creation (hsi)
 # ---------------------------------------------------------------------------
 
-def create_panorama_project(tiff_files, hfov):
+def create_panorama_project(image_files, hfov):
     """
-    Build an hsi.Panorama object from a list of TIFF files.
+    Build an hsi.Panorama object from a list of image files (TIFF or JPG).
 
     Each image is set to rectilinear projection with the given HFOV.
     If readEXIF() fails (TIFFs from rawpy may lack EXIF), dimensions are
-    read with tifffile as a fallback.
+    read with Pillow as a fallback.
 
     Args:
-        tiff_files: List of absolute TIFF paths.
+        image_files: List of absolute image paths (TIFF or JPG).
         hfov: Horizontal field of view in degrees.
 
     Returns:
@@ -215,7 +238,7 @@ def create_panorama_project(tiff_files, hfov):
 
     pano = hsi.Panorama()
 
-    for path in tiff_files:
+    for path in image_files:
         img = hsi.SrcPanoImage()
         img.setFilename(path)
 
@@ -227,11 +250,10 @@ def create_panorama_project(tiff_files, hfov):
             img.readEXIF()
         except RuntimeError:
             log.debug(f"readEXIF failed for '{os.path.basename(path)}', "
-                      "reading dimensions with tifffile.")
-            import tifffile
-            with tifffile.TiffFile(path) as tif:
-                page = tif.pages[0]
-                w, h = page.shape[1], page.shape[0]
+                      "reading dimensions with Pillow.")
+            from PIL import Image
+            with Image.open(path) as pil_img:
+                w, h = pil_img.size
             img.setSize(hsi.Size2D(w, h))
 
         img.setProjection(hsi.SrcPanoImage.RECTILINEAR)
@@ -641,18 +663,18 @@ def cleanup_intermediate_files(files):
 
 def create_panorama(pano_folder):
     """
-    Assemble TIFF files in *pano_folder* into a stitched panorama.
+    Assemble images in *pano_folder* into a stitched panorama.
 
-    The folder is expected to contain 16-bit ProPhoto RGB TIFFs generated
-    by raw_processing.create_tiff_16bit_from_raw().
+    The folder may contain 16-bit ProPhoto RGB TIFFs (generated from RAW by
+    raw_processing) or camera JPGs (when no RAW is available).
 
     The .pto project file is always saved (even on failure) so it can be
     opened in Hugin GUI for manual adjustments.
 
     File naming:
-        Input folder:  ``IMG_0010-13_4/`` (contains .tiff files)
+        Input folder:  ``IMG_0010-13_4/`` (contains .tiff or .jpg files)
         PTO file:      ``IMG_0010-13_4/IMG_0010-13_4.pto``
-        Final output:  ``IMG_0010-13_4.tiff`` (in the parent directory)
+        Final output:  ``IMG_0010-13_4.avif`` (in the parent directory)
 
     Args:
         pano_folder: Path to the panorama subfolder.
@@ -677,17 +699,17 @@ def create_panorama(pano_folder):
     if not check_prerequisites():
         return False
 
-    # --- Collect TIFFs ---
-    tiff_files = collect_tiff_files(pano_folder)
-    if not tiff_files:
+    # --- Collect images (TIFFs or JPGs) ---
+    image_files = collect_panorama_images(pano_folder)
+    if not image_files:
         return False
 
     # --- Lens parameters ---
-    hfov, crop_factor = get_lens_parameters(pano_folder, tiff_files)
+    hfov, crop_factor = get_lens_parameters(pano_folder, image_files)
     log.info(f"Using HFOV = {hfov:.2f}° (crop factor = {crop_factor})")
 
     # --- Create hsi project ---
-    pano = create_panorama_project(tiff_files, hfov)
+    pano = create_panorama_project(image_files, hfov)
 
     # --- Write initial PTO ---
     pto_path = os.path.join(pano_folder, f"{folder_name}.pto")

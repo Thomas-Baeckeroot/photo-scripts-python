@@ -8,6 +8,7 @@ It replaces the former sort_photos() function from the monolithic script.
 
 import logging
 import os
+import shutil
 
 from photo_sorter.config import AppConfig
 from photo_sorter.display import log_files, log_title
@@ -65,11 +66,27 @@ def sort_photos(photo_folder, gpx_file, app_config):
 
     files = create_processed_images(photo_folder, files, app_config)
 
-    # Assemble panoramas from generated TIFFs
+    # Assemble panoramas from generated TIFFs or existing JPGs
     pano_groups = sorted({f.group_id for f in files
                           if f.group_type == "panorama" and f.group_id})
     for group_id in pano_groups:
         pano_folder = os.path.join(photo_folder, group_id)
+
+        if not os.path.isdir(pano_folder):
+            # No TIFF subfolder — check if the group members have JPGs
+            group_files = [f for f in files
+                           if f.group_id == group_id
+                           and f.processed_filename]
+            if group_files:
+                log.info(f"No TIFFs for panorama '{group_id}', "
+                         f"using {len(group_files)} existing JPGs.")
+                os.makedirs(pano_folder, exist_ok=True)
+                for f in group_files:
+                    src = os.path.join(photo_folder, f.processed_filename)
+                    dst = os.path.join(pano_folder, f.processed_filename)
+                    if os.path.isfile(src) and not os.path.isfile(dst):
+                        shutil.move(src, dst)
+
         if os.path.isdir(pano_folder):
             create_panorama(pano_folder)
 
