@@ -199,6 +199,80 @@ def create_sub_folder_name(serie_of_photos, serie_is_hdr):
     return subfolder_name
 
 
+def _edit_group(files, group_id, serie_of_photos):
+    """
+    Prompt user for new first/last basenames, validate, handle conflicts,
+    and update group assignments in-place.
+
+    Returns True if edit was applied, False if user cancelled or input was invalid.
+    """
+    first_default = serie_of_photos[0]
+    last_default = serie_of_photos[-1]
+
+    new_first = input(f"Which is the 'basename' of the first image (default is {first_default})? ")
+    if not new_first:
+        new_first = first_default
+
+    new_last = input(f"Which is the 'basename' of the last image (default is {last_default})? ")
+    if not new_last:
+        new_last = last_default
+
+    # Validate basenames exist
+    all_basenames = [f.basename for f in files]
+    if new_first not in all_basenames:
+        print(f"Error: '{new_first}' not found in file list.")
+        return False
+    if new_last not in all_basenames:
+        print(f"Error: '{new_last}' not found in file list.")
+        return False
+
+    first_idx = all_basenames.index(new_first)
+    last_idx = all_basenames.index(new_last)
+    if first_idx > last_idx:
+        print(f"Error: first image '{new_first}' comes after last image '{new_last}'.")
+        return False
+    if first_idx == last_idx:
+        print(f"Error: group must contain at least 2 images.")
+        return False
+
+    # Check for conflicts with other groups
+    new_range = files[first_idx:last_idx + 1]
+    conflicts = {}
+    for f in new_range:
+        if f.group_id and f.group_id != group_id:
+            conflicts.setdefault(f.group_id, []).append(f.basename)
+
+    if conflicts:
+        print("Warning: the following images belong to other groups:")
+        for gid, basenames in conflicts.items():
+            print(f"  {gid}: {', '.join(basenames)}")
+        confirm = input("Transfer these images to the current group? [Y/N]: ")
+        if confirm.lower() != 'y':
+            return False
+
+    # Clear old group assignments
+    for f in files:
+        if f.group_id == group_id:
+            f.group_id = None
+            f.group_type = None
+
+    # Clear conflicting group assignments
+    for gid in conflicts:
+        for f in files:
+            if f.group_id == gid:
+                f.group_id = None
+                f.group_type = None
+
+    # Assign new group
+    for f in new_range:
+        f.group_id = group_id
+        f.group_type = "group"
+
+    log.info(f"Group '{group_id}' edited: {new_first} to {new_last} ({len(new_range)} images)")
+    log_files(files, "<folder>/")
+    return True
+
+
 def confirm_groups(files):
     """
     Walks through each group to confirm with the user if this group is:
