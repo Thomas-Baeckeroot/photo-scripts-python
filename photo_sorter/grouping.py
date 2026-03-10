@@ -7,6 +7,7 @@ Functions:
     review_and_cleanup_groups()      — Drop 2-image groups, reassign IDs
     identify_advanced_image_groups() — Advanced grouping (calls basic + refinement)
     confirm_groups()                 — Interactive user confirmation of groups
+    _edit_group()                    — Edit the range of images in a group
     create_sub_folder_name()         — Generate subfolder name from a series
 """
 
@@ -277,6 +278,7 @@ def confirm_groups(files):
     """
     Walks through each group to confirm with the user if this group is:
     - [P]anorama: keep group, generate png, create Hugin script (default)
+    - [E]dit: change the range of images in this group
     - [C]ancel: images were incorrectly detected as a group
     - [O]ther: group is correct but not a panorama
 
@@ -314,11 +316,15 @@ def confirm_groups(files):
             # Ask if this group is confirmed as a Panorama, or Canceled, or something else:
             print(f"What should be done with this group? '{sub_folder_name}' ")
             print("- [P]anorama: keep group, generate png, create Hugin script (default)")
+            print("- [E]dit panorama: change images in this group")
             print("- [C]ancel: images were incorrectly detected as a group")
             print("- [O]ther: group is correct but not a panorama:"
                   " keep group, generate png but do not create Hugin script")
-            choice = input("\nEnter your choice [P/C/O]:")
-            if choice.lower() == "p" or choice == "":
+            choice = input("\nEnter your choice [P/E/C/O]:")
+            if choice.lower() == "e":
+                _edit_group(files, group_id, serie_of_photos)
+                continue
+            elif choice.lower() == "p" or choice == "":
                 log.info("Group confirmed as Panorama")
                 choice = "panorama"
             elif choice.lower() == "c":
