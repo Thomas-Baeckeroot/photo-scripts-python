@@ -11,6 +11,12 @@ Scripts Python pour organiser automatiquement les photos après téléchargement
 La vitesse d'exécution n'est pas une priorité. Ce que l'on souhaite est principalement avoir un résultat de qualité.
 Le script peut prendre plusieurs minutes ou heures ce n'est pas un problème.
 
+## Environnement virtuel
+
+```bash
+source .venv/bin/activate
+```
+
 ## Commandes principales
 
 ```bash
