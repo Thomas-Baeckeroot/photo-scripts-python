@@ -80,7 +80,6 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         lookup_table:       Optional (90, 16, 16, 3) numpy array of HSV corrections
                             (from dcp_profile.parse_dcp_lookup_table). Applied BEFORE
                             tone curve via trilinear interpolation in HSV space.
-                            Only used for AVIF output (not TIFF)
         color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
                             correction. Compensates for rawpy using D65-only ColorMatrix
                             when the scene illuminant is non-D65 (e.g. tungsten 3700K).
@@ -105,21 +104,23 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     try:
         with rawpy.imread(raw_file_path) as raw:
 
-            # When a DCP tone curve is provided, rawpy outputs BT.709-encoded
-            # data at 16-bit precision. The tone curve is then applied on top as
-            # a contrast/color enhancement — NOT as a gamma replacement.
+            # Use 16-bit internal processing whenever any DCP correction is applied
+            # (tone curve, LUT, or color correction matrix). This preserves maximum
+            # precision through the correction pipeline before final downsampling.
             #
-            # This "DCP on BT.709" approach produces brightness and contrast that
-            # closely match the camera's in-body JPEG rendering ("Camera Standard").
+            # When a DCP tone curve is provided, the "DCP on BT.709" approach
+            # produces brightness and contrast that closely match the camera's
+            # in-body JPEG rendering ("Camera Standard").
             # Tested against Canon EOS R7 reference JPEGs: mean luminance within 3%.
-            if tone_curve is not None:
+            has_corrections = (tone_curve is not None or lookup_table is not None
+                               or color_correction_matrix is not None)
+            if has_corrections:
                 internal_bps = 16
-                gamma = (2.222, 4.5)    # BT.709 — DCP enhances this, doesn't replace it
-                no_auto_bright = False
             else:
                 internal_bps = output_bps
-                gamma = (2.222, 4.5)    # BT.709 default
-                no_auto_bright = False  # let rawpy auto-adjust brightness
+
+            gamma = (2.222, 4.5)        # BT.709
+            no_auto_bright = False
 
             # Build postprocess parameters (factored to avoid duplication)
             params_kwargs = dict(
@@ -162,11 +163,11 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         # Phase 3 (color correction matrix) is applied inside apply_lookup_table()
         # when a LUT is present, or standalone via apply_color_correction() otherwise.
         # Both operations happen in linear sRGB space (BT.709 linearized).
-        if tone_curve is not None and lookup_table is not None:
+        if lookup_table is not None:
             rgb = apply_lookup_table(rgb, lookup_table, linearize_bt709=True,
                                      color_correction_matrix=color_correction_matrix)
             log.debug(f" ┊                 After Phase 3+2 (linear): {rgb.shape}, dtype={rgb.dtype}")
-        elif tone_curve is not None and color_correction_matrix is not None:
+        elif color_correction_matrix is not None:
             # Phase 3 only (no LUT): apply color correction standalone
             rgb = apply_color_correction(rgb, color_correction_matrix,
                                          linearize_bt709=True)
@@ -179,7 +180,8 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
             rgb = apply_tone_curve(rgb, tone_curve)
             log.debug(f" ┊                 After tone curve: {rgb.shape}, dtype={rgb.dtype}")
 
-            # Downsample from internal 16-bit to requested output depth
+        # Downsample from internal 16-bit to requested output depth if needed
+        if internal_bps > output_bps:
             if output_bps == 10 and rgb.dtype == np.uint16:
                 rgb = (rgb >> 6).astype(np.uint16)   # [0, 65535] → [0, 1023]
                 log.debug(f" ┊                 Downsampled to 10-bit: max={rgb.max()}")
@@ -218,16 +220,23 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         return False
 
 
-def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config):
+def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config,
+                               lookup_table=None, color_correction_matrix=None):
     """
     Create a 16-bit TIFF image from a RAW file for panorama/HDR processing.
-    Uses develop_raw() with 16-bit ProPhoto RGB settings to preserve maximum
-    color gamut and dynamic range for subsequent merging operations.
+    Uses develop_raw() with 16-bit sRGB settings. When DCP corrections are
+    provided (Phase 2 LookTable + Phase 3 ColorMatrix), they are applied to
+    produce device-independent colors with correct white balance.
+    Phase 1 (ToneCurve) is intentionally omitted to keep data suitable for
+    blending (linear response avoids seam artifacts in enblend).
 
     Args:
         photo_folder (str): Base photo folder path
         file_entry (ImageFile): File entry containing required info (input file name, group, ...)
         app_config (AppConfig): Application configuration (reads dark_frame_path)
+        lookup_table: Optional (90, 16, 16, 3) numpy array of HSV corrections (Phase 2)
+        color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
+                                 correction. None for D65 (daylight) scenes.
 
     Returns:
         ImageFile: Updated file entry with processed file info
@@ -249,8 +258,10 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config):
         tiff_output_path,
         output_format="tiff",
         output_bps=16,                  # 16-bit for maximum dynamic range
-        output_colorspace="prophoto",   # ProPhoto RGB: widest gamut, ideal for merging
+        output_colorspace="srgb",       # sRGB: corrections pipeline is designed for sRGB
         dark_frame_path=app_config.dark_frame_path,
+        lookup_table=lookup_table,
+        color_correction_matrix=color_correction_matrix,
     )
 
     if success:
@@ -327,8 +338,10 @@ def create_processed_images(photo_folder, files, app_config):
     # DCP profile loading strategy:
     # - Explicit path in config → single profile for all images (existing behavior)
     # - Auto-detect (no explicit path) → per-image selection by EXIF PictureStyle
-    # Both are applied to AVIF (screen viewing) only — TIFF intermediates for
-    # panorama/HDR stay linear to preserve dynamic range during merging.
+    # DCP corrections applied:
+    #   AVIF (screen viewing): Phase 1 (ToneCurve) + Phase 2 (LUT) + Phase 3 (CCM)
+    #   TIFF (panorama/HDR):   Phase 2 (LUT) + Phase 3 (CCM) — no ToneCurve to keep
+    #                          data suitable for blending (linear response)
 
     # Mode 1: Explicit DCP profile path → single profile for all images
     if app_config.dcp_profile_path:
@@ -344,19 +357,25 @@ def create_processed_images(photo_folder, files, app_config):
 
         for file_entry in files:
             if file_entry.raw_filename and not file_entry.processed_filename:
+                # Phase 3: compute per-image color correction from scene temperature
+                ccm = None
+                if (cm1 is not None and cm2 is not None
+                        and temp1 is not None and temp2 is not None
+                        and file_entry.color_temperature is not None):
+                    ccm = compute_color_correction_matrix(
+                        cm1, cm2, temp1, temp2,
+                        file_entry.color_temperature)
+
                 if file_entry.group_id:
                     log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
-                              f"for group '{file_entry.group_id}'")
-                    file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
+                              f"for group '{file_entry.group_id}' "
+                              f"(color_temp={file_entry.color_temperature}K, "
+                              f"ccm={'yes' if ccm is not None else 'no'})")
+                    file_entry = create_tiff_16bit_from_raw(
+                        photo_folder, file_entry, app_config,
+                        lookup_table=lookup_table,
+                        color_correction_matrix=ccm)
                 else:
-                    # Phase 3: compute per-image color correction from scene temperature
-                    ccm = None
-                    if (cm1 is not None and cm2 is not None
-                            and temp1 is not None and temp2 is not None
-                            and file_entry.color_temperature is not None):
-                        ccm = compute_color_correction_matrix(
-                            cm1, cm2, temp1, temp2,
-                            file_entry.color_temperature)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
                               f"for individual image "
                               f"(color_temp={file_entry.color_temperature}K, "
@@ -373,21 +392,29 @@ def create_processed_images(photo_folder, files, app_config):
 
         for file_entry in files:
             if file_entry.raw_filename and not file_entry.processed_filename:
+                style = file_entry.picture_style or "Standard"
+                tc, lut, cm1, cm2, temp1, temp2 = dcp_cache.get(style)
+
+                # Phase 3: compute per-image color correction from scene temperature
+                ccm = None
+                if (cm1 is not None and cm2 is not None
+                        and temp1 is not None and temp2 is not None
+                        and file_entry.color_temperature is not None):
+                    ccm = compute_color_correction_matrix(
+                        cm1, cm2, temp1, temp2,
+                        file_entry.color_temperature)
+
                 if file_entry.group_id:
                     log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
-                              f"for group '{file_entry.group_id}'")
-                    file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
+                              f"for group '{file_entry.group_id}' "
+                              f"(PictureStyle='{style}', "
+                              f"color_temp={file_entry.color_temperature}K, "
+                              f"ccm={'yes' if ccm is not None else 'no'})")
+                    file_entry = create_tiff_16bit_from_raw(
+                        photo_folder, file_entry, app_config,
+                        lookup_table=lut,
+                        color_correction_matrix=ccm)
                 else:
-                    style = file_entry.picture_style or "Standard"
-                    tc, lut, cm1, cm2, temp1, temp2 = dcp_cache.get(style)
-                    # Phase 3: compute per-image color correction from scene temperature
-                    ccm = None
-                    if (cm1 is not None and cm2 is not None
-                            and temp1 is not None and temp2 is not None
-                            and file_entry.color_temperature is not None):
-                        ccm = compute_color_correction_matrix(
-                            cm1, cm2, temp1, temp2,
-                            file_entry.color_temperature)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
                               f"(PictureStyle='{style}', "
                               f"color_temp={file_entry.color_temperature}K, "
