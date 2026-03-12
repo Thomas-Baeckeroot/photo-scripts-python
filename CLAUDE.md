@@ -292,3 +292,25 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 - [ ] **Réduire la verbosité de exiftool**
   - La sortie avec `-v1` (ligne 1198) reste trop verbeuse
   - Option : filtrer la sortie ou utiliser un niveau de verbosité différent
+
+- [ ] **Option TIFF / EXR pour les fichiers intermédiaires panorama/HDR**
+  Actuellement les fichiers intermédiaires sont en TIFF 16-bit entier non compressé.
+  Hugin supporte aussi EXR (OpenEXR 16-bit half-float) en entrée.
+
+  Comparaison des deux formats pour une image 32.5 MP (Canon EOS R7, 6960×4640×3) :
+
+  | | TIFF 16-bit entier | EXR 16-bit half-float |
+  |---|---|---|
+  | Précision | 16 bits (65 536 niveaux, uniforme) | ~11 bits effectifs (10 bits mantisse, 2 048 niveaux par magnitude) |
+  | Taille par image | ~194 MB (non compressé) | ~50-80 MB (compression PIZ lossless) |
+  | Plage dynamique | [0, 65535] fixe | Flottant, peut dépasser 1.0 (utile pour merge HDR) |
+  | Clipping highlights | Non (rawpy normalise dans la plage avant export) | Non (plage illimitée) |
+
+  **Avantages EXR** : 2-3× plus petit sur disque ; plage >1.0 utile pour le merge HDR
+  (valeurs combinées de plusieurs expositions peuvent dépasser la plage d'une seule).
+  **Avantages TIFF** : précision maximale (16 vs ~11 bits) ; pas de dépendance supplémentaire.
+  **Pour les panoramas** (même exposition) : pas de highlights clippées dans les deux cas,
+  la plage >1.0 d'EXR n'apporte rien. TIFF reste le meilleur choix en précision.
+  **Pour le HDR** : EXR serait préférable grâce à la plage >1.0.
+
+  Dépendance Python pour EXR : `imageio` ou `OpenEXR` + `Imath`.
