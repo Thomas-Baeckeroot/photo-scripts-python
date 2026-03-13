@@ -7,6 +7,7 @@ Functions:
     get_exif()                — Unified EXIF access (currently delegates to exiftool)
     parse_exposure_time()     — Convert EXIF exposure value to float seconds
     extract_image_metadata()  — Batch extraction of timestamp/exposure/GPS for ImageFile list
+    copy_exif_from_raw()      — Copy all EXIF metadata from a RAW file to a processed output
 """
 
 import json
@@ -85,6 +86,49 @@ def parse_exposure_time(value):
     except Exception as e:
         log.error(f"Could not parse exposure time '{value}': {e}")
         return None
+
+
+def copy_exif_from_raw(raw_path, output_path):
+    """
+    Copy all EXIF/IPTC/XMP metadata from a RAW file to a processed output file.
+
+    Uses exiftool -TagsFromFile to transfer camera metadata (Make, Model, Lens,
+    Aperture, ExposureTime, ISO, WhiteBalance, Flash, GPS, etc.) so that image
+    viewers and DAM software (e.g. DigiKam) can display photo properties for
+    files generated from RAW (AVIF, TIFF).
+
+    Tags that are not writable in the target format are silently skipped by
+    exiftool. The output file is modified in-place (-overwrite_original).
+
+    Args:
+        raw_path (str):    Full path to the source RAW file (.CR3, .CR2, .NEF, etc.)
+        output_path (str): Full path to the processed output file (.avif, .tiff, etc.)
+
+    Returns:
+        True on success, False on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["exiftool",
+             "-TagsFromFile", raw_path,
+             "-all:all",
+             "-overwrite_original",
+             output_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        if result.returncode == 0:
+            log.debug(f" ┊      EXIF copied from '{os.path.basename(raw_path)}' "
+                      f"→ '{os.path.basename(output_path)}'")
+            return True
+        else:
+            log.warning(f" ┊      exiftool returned code {result.returncode} "
+                        f"copying EXIF to '{output_path}': {result.stderr.strip()}")
+            return False
+    except Exception as e:
+        log.error(f" ┊      Failed to copy EXIF from '{raw_path}' to '{output_path}': {e}")
+        return False
 
 
 def extract_image_metadata(photo_folder, files):

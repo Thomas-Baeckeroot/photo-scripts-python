@@ -20,6 +20,7 @@ from PIL import Image
 
 from photo_sorter.config import AppConfig
 from photo_sorter.constants import DEFAULT_DCP_PROFILE_DIR
+from photo_sorter.metadata import copy_exif_from_raw
 from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
                                        apply_lookup_table, parse_dcp_lookup_table,
                                        apply_color_correction,
@@ -316,6 +317,7 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config,
     if success:
         file_entry.processed_relative_path = "."
         file_entry.processed_filename = avif_filename
+        copy_exif_from_raw(raw_file_path, avif_output_path)
 
     return file_entry
 
