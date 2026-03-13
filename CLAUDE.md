@@ -301,12 +301,12 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 
   Comparaison des deux formats pour une image 32.5 MP (Canon EOS R7, 6960×4640×3) :
 
-  | | TIFF 16-bit entier | EXR 16-bit half-float |
-  |---|---|---|
-  | Précision | 16 bits (65 536 niveaux, uniforme) | ~11 bits effectifs (10 bits mantisse, 2 048 niveaux par magnitude) |
-  | Taille par image | ~194 MB (non compressé) | ~50-80 MB (compression PIZ lossless) |
-  | Plage dynamique | [0, 65535] fixe | Flottant, peut dépasser 1.0 (utile pour merge HDR) |
-  | Clipping highlights | Non (rawpy normalise dans la plage avant export) | Non (plage illimitée) |
+  |                     | TIFF 16-bit entier                               | EXR 16-bit half-float                                              |
+  |---------------------|--------------------------------------------------|--------------------------------------------------------------------|
+  | Précision           | 16 bits (65 536 niveaux, uniforme)               | ~11 bits effectifs (10 bits mantisse, 2 048 niveaux par magnitude) |
+  | Taille par image    | ~194 MB (non compressé)                          | ~50-80 MB (compression PIZ lossless)                               |
+  | Plage dynamique     | [0, 65535] fixe                                  | Flottant, peut dépasser 1.0 (utile pour merge HDR)                 |
+  | Clipping highlights | Non (rawpy normalise dans la plage avant export) | Non (plage illimitée)                                              |
 
   **Avantages EXR** : 2-3× plus petit sur disque ; plage >1.0 utile pour le merge HDR
   (valeurs combinées de plusieurs expositions peuvent dépasser la plage d'une seule).
