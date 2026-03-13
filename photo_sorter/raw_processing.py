@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # Mapping of colorspace names to rawpy constants
 COLORSPACE_MAP = {
     'srgb': rawpy.ColorSpace.sRGB,           # Standard for web/screen display
-    'prophoto': rawpy.ColorSpace.ProPhoto,    # Wide gamut, ideal for HDR/panorama merging
+    'prophoto': rawpy.ColorSpace.ProPhoto,    # Wide gamut (available but not used by default)
 }
 
 

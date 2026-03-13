@@ -177,7 +177,9 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
     nuances dans les dégradés (Pillow ne supporte que 8-bit)
   - Auto-détection du profil dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`
   - Configurable via `dcp_profile` dans `[Processing]` du fichier de config (`none` pour désactiver)
-  - Appliqué aux AVIF uniquement (les TIFF panorama/HDR restent BT.709 16-bit pour le merging)
+  - Phase 1 (ToneCurve) appliquée aux AVIF uniquement — les TIFF panorama/HDR reçoivent
+    Phase 2+3 (LUT + CCM) pour des couleurs correctes, mais pas la ToneCurve (données
+    linéaires requises pour le blending enblend)
   - Sans profil DCP : fallback AVIF 8-bit via Pillow avec BT.709 seul
 
 - [x] **Couleurs fades — Phase 2 : LookTable 3D du DCP**

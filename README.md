@@ -80,26 +80,37 @@ to organise it as:
     │   ├── IMG_0022.JPG       |
     │   └── IMG_0023.JPG       ╯
     │   
-    ├── IMG_0024-6_3/                ╮
-    │   ├── IMG_0024_temp.PNG        | (set of generated pictures for panorama #2.
-    │   ├── IMG_0025_temp.PNG        |  As of April 2025, Hugin does not manage
-    │   ├── IMG_0026_temp.PNG        |  correctly RAWs as input files.)
-    │   ├── generate_IMG_0024-6_3.sh |
-    │   └── IMG_0024-6_3.pto         ╯
-    │   
+    ├── IMG_0024-6_3/          ╮
+    │   ├── IMG_0024.tiff      | (16-bit sRGB TIFFs generated from RAW for panorama #2.
+    │   ├── IMG_0025.tiff      |  Hugin does not handle RAW files directly.)
+    │   ├── IMG_0026.tiff      |
+    │   └── IMG_0024-6_3.pto   ╯
+    │
     ├── IMG_0001.JPG
     ├── IMG_0002.jpeg
     ├── IMG_0003.avif
-    ├── IMG_0011.avif      (new)
-    ├── IMG_0012.avif      (new)
-    ├── IMG_0020-3_4.avif  (new, far from implemented)
-    └── IMG_0024-6_3.avif  (new, far from implemented)
+    ├── IMG_0011.avif   (generated from RAW)
+    └── IMG_0012.avif   (generated from RAW)
 ```
 
-Panorama and set of pictures moved to a dedicated folder.  
-Raw files in "RAWs" folder.  
-If a raw file does not have a "small" version, then one is created (avif or jpeg).  
+Panorama and set of pictures moved to a dedicated folder.
+Raw files in "RAWs" folder.
+If a raw file does not have a processed version, one is generated from RAW (see below).
 If a .gpx file (GPS track) is found, images are geotagged using `exiftool`.
+
+#### RAW processing
+
+When generating images from RAW files, the pipeline applies:
+
+- **Individual images** → 10-bit AVIF (sRGB)
+  - Phase 1: DCP tone curve (contrast S-curve matching the camera's in-body JPEG rendering)
+  - Phase 2: DCP 3D LookTable (per-HSV-voxel corrections in ProPhoto space)
+  - Phase 3: ColorMatrix interpolation by scene color temperature (corrects white balance shift under non-D65 illuminants such as tungsten)
+
+- **Panorama/HDR groups** → 16-bit TIFF (sRGB)
+  - Phase 2 + Phase 3 only — the tone curve (Phase 1) is intentionally omitted to keep a linear response suitable for blending with `enblend`
+
+DCP profiles are auto-detected by EXIF `PictureStyle` from the Adobe Camera Raw profile directory (`Camera Standard`, `Camera Portrait`, etc.). Without a DCP profile, images fall back to 8-bit AVIF with BT.709 gamma only.
 
 ---
 I'm wondering if the below would be better?
@@ -132,8 +143,7 @@ I'm wondering if the below would be better?
 
 ### create_panorama.py
 
-Automates assembly of panorama from files in a folder.
-This script performs some actions that are generally done manually in Hugin to create a panorama.
-Result is without warranty but at least should give a decent draft.
-
-<u>Note</u>: It has been broken by some hugin update around 2020/2022, I'll fix it some day... 
+Automates assembly of a panorama from TIFF or JPEG files in a folder, using the Hugin
+Python scripting interface (`hsi`). Performs control point detection (`cpfind`),
+optimisation, remapping (`nona`) and blending (`enblend`) without manual intervention.
+Result is without warranty but should give a usable draft.

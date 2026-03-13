@@ -95,7 +95,7 @@ def collect_panorama_images(pano_folder):
     Returns:
         list[str]: Sorted list of absolute image paths, or empty list on error.
     """
-    # Try TIFFs first (best quality — 16-bit ProPhoto from RAW)
+    # Try TIFFs first (best quality — 16-bit sRGB from RAW with DCP color corrections)
     for pattern_ext in (PANO_TIFF_EXTENSION, '.jpg', '.jpeg', '.JPG', '.JPEG'):
         pattern = os.path.join(pano_folder, f"*{pattern_ext}")
         files = sorted(glob.glob(pattern))
@@ -665,8 +665,9 @@ def create_panorama(pano_folder):
     """
     Assemble images in *pano_folder* into a stitched panorama.
 
-    The folder may contain 16-bit ProPhoto RGB TIFFs (generated from RAW by
-    raw_processing) or camera JPGs (when no RAW is available).
+    The folder may contain 16-bit sRGB TIFFs (generated from RAW by raw_processing,
+    with DCP Phase 2+3 color corrections applied) or camera JPGs (when no RAW is
+    available).
 
     The .pto project file is always saved (even on failure) so it can be
     opened in Hugin GUI for manual adjustments.
