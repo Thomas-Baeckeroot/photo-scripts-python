@@ -48,6 +48,7 @@ photo-scripts-python/
 │   ├── metadata.py                 # EXIF via exiftool
 │   ├── grouping.py                 # Détection panoramas/HDR + confirmation interactive
 │   ├── dcp_profile.py              # Parsing DCP Adobe, extraction/application tone curve
+│   ├── lens_correction.py          # Lens distortion/vignetting/TCA correction (lensfunpy)
 │   ├── raw_processing.py           # develop_raw(), create_avif, create_tiff (utilise dcp_profile)
 │   ├── panorama.py                 # Assemblage panorama via hsi (Hugin Python bindings)
 │   ├── geotag.py                   # GPX parsing, géolocalisation
@@ -66,10 +67,10 @@ constants    config (→ constants)    models     (feuilles)
       \        |                    /
        display  (→ models)
       /    |    \
-file_ops  metadata  grouping  dcp_profile  geotag  panorama (→ display, metadata)
-      \       |        |          |        /
-       \      |        |          |       /
-        \     |     raw_processing (→ dcp_profile, config, display)
+file_ops  metadata  grouping  dcp_profile  lens_correction  geotag  panorama (→ display, metadata)
+      \       |        |          |             |          /
+       \      |        |          |             |         /
+        \     |     raw_processing (→ dcp_profile, lens_correction, config, display)
          \    |        |         /
           pipeline  (→ tous les modules domaine)
               |
@@ -96,11 +97,14 @@ file_ops  metadata  grouping  dcp_profile  geotag  panorama (→ display, metada
 - `numpy` - manipulation de tableaux (sortie rawpy → PIL/tifffile)
 - `tifffile` - écriture TIFF 16-bit RGB + lecture des profils DCP Adobe (format TIFF)
 - `imagecodecs` - encodage AVIF 10-bit (Pillow ne supporte que 8-bit)
+- `lensfunpy` - correction distorsion/vignettage/TCA (wraps liblensfun)
+- `opencv-python-headless` - `cv2.remap()` pour la correction géométrique
 
 ### Outils système (requis)
 - `exiftool` - extraction métadonnées EXIF + géotagging via GPX
 - `hugin-tools` - assemblage panorama (fournit `hsi`, `cpfind`, `nona`) — Linux x86_64 uniquement
 - `enblend` - fusion d'images pour panoramas
+- `liblensfun1` - base de données de profils optiques (utilisé par `lensfunpy`)
 
 ## Structures de données clés
 
@@ -126,6 +130,9 @@ class ImageFile:
     group_type: Optional[str]        # Type: panorama, hdr, focus, burst
     picture_style: Optional[str]     # Canon PictureStyle (Standard, Portrait, ...)
     color_temperature: Optional[int] # Température couleur (Kelvin) depuis EXIF
+    lens_model: Optional[str]        # Nom de l'objectif depuis EXIF (pour correction optique)
+    focal_length: Optional[float]    # Focale en mm depuis EXIF
+    aperture: Optional[float]        # Ouverture (f-number) depuis EXIF
 ```
 
 ## Constantes importantes
@@ -139,7 +146,7 @@ MIN_TIME_BETWEEN_PANOS = 15  # secondes entre photos d'un même groupe
 ## Pipeline de traitement
 
 1. `scan_directory()` - Scan récursif des fichiers
-2. `extract_image_metadata()` - Extraction EXIF (timestamp, exposition, GPS)
+2. `extract_image_metadata()` - Extraction EXIF (timestamp, exposition, GPS, objectif, focale, ouverture)
 3. `geotag_pictures()` - Géolocalisation via GPX
 4. `consolidate_images()` - Fusion RAW + versions traitées par basename
 5. `identify_advanced_image_groups()` - Détection panoramas/HDR/focus
