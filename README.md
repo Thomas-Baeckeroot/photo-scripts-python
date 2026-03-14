@@ -7,10 +7,12 @@ Couple of scripts (in Python) to manage pictures.
 ### System dependencies
 
 ```bash
-sudo apt install exiftool hugin-tools
+sudo apt install exiftool hugin-tools liblensfun1
 ```
 
-`hugin-tools` provides the `hsi` Python module (Hugin scripting interface) and CLI tools (`cpfind`, `nona`, `enblend`) used for panorama stitching.
+- `exiftool` — EXIF metadata extraction and geotagging
+- `hugin-tools` — provides the `hsi` Python module (Hugin scripting interface) and CLI tools (`cpfind`, `nona`, `enblend`) used for panorama stitching
+- `liblensfun1` — lens correction database (distortion, vignetting, TCA profiles)
 
 ### Python environment
 
@@ -103,14 +105,24 @@ If a .gpx file (GPS track) is found, images are geotagged using `exiftool`.
 When generating images from RAW files, the pipeline applies:
 
 - **Individual images** → 10-bit AVIF (sRGB)
+  - Lens correction: distortion, vignetting, TCA (via lensfun, when a profile exists for the lens)
   - Phase 1: DCP tone curve (contrast S-curve matching the camera's in-body JPEG rendering)
   - Phase 2: DCP 3D LookTable (per-HSV-voxel corrections in ProPhoto space)
   - Phase 3: ColorMatrix interpolation by scene color temperature (corrects white balance shift under non-D65 illuminants such as tungsten)
+  - EXIF metadata copied from RAW to AVIF (Make, Model, Lens, Aperture, ISO, GPS, etc.)
 
 - **Panorama/HDR groups** → 16-bit TIFF (sRGB)
   - Phase 2 + Phase 3 only — the tone curve (Phase 1) is intentionally omitted to keep a linear response suitable for blending with `enblend`
+  - No lens correction — Hugin applies its own lens distortion model during projection
 
 DCP profiles are auto-detected by EXIF `PictureStyle` from the Adobe Camera Raw profile directory (`Camera Standard`, `Camera Portrait`, etc.). Without a DCP profile, images fall back to 8-bit AVIF with BT.709 gamma only.
+
+#### Lens correction
+
+Lens distortion, vignetting (corner darkening), and TCA (chromatic aberration) are corrected using [lensfun](https://lensfun.github.io/), an open-source database of lens calibration profiles. The lens is identified automatically from the EXIF `LensModel` tag.
+If your optic is not found, you can try updating the db with command `lensfun-update-data`.
+
+If the lens is not found in the lensfun database, the image is left uncorrected (with a log warning). The database can be updated by replacing the XML files in `/usr/share/lensfun/version_1/` with newer versions from the [lensfun GitHub repository](https://github.com/lensfun/lensfun/tree/master/data/db).
 
 ---
 I'm wondering if the below would be better?
