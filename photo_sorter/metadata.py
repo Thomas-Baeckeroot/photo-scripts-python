@@ -151,6 +151,9 @@ def extract_image_metadata(photo_folder, files):
     EXIF_GPS_INFO = 'GPSInfo'
     EXIF_PICTURE_STYLE = 'PictureStyle'
     EXIF_COLOR_TEMPERATURE = 'ColorTemperature'
+    EXIF_LENS_MODEL = 'LensModel'
+    EXIF_FOCAL_LENGTH = 'FocalLength'
+    EXIF_FNUMBER = 'FNumber'
 
     for file in files:
         # Only process files that are images (RAW or processed)
@@ -198,12 +201,39 @@ def extract_image_metadata(photo_folder, files):
                                 f"{file.original_filename}: "
                                 f"{exif[EXIF_COLOR_TEMPERATURE]}")
 
+            # Extract lens information (for lens distortion correction)
+            if EXIF_LENS_MODEL in exif:
+                file.lens_model = exif[EXIF_LENS_MODEL]
+
+            if EXIF_FOCAL_LENGTH in exif:
+                try:
+                    # exiftool may return "45.0 mm" or just 45.0
+                    fl_value = exif[EXIF_FOCAL_LENGTH]
+                    if isinstance(fl_value, str):
+                        fl_value = fl_value.split()[0]  # "45.0 mm" → "45.0"
+                    file.focal_length = float(fl_value)
+                except (ValueError, TypeError, IndexError):
+                    log.warning(f"Invalid FocalLength in "
+                                f"{file.original_filename}: "
+                                f"{exif[EXIF_FOCAL_LENGTH]}")
+
+            if EXIF_FNUMBER in exif:
+                try:
+                    file.aperture = float(exif[EXIF_FNUMBER])
+                except (ValueError, TypeError):
+                    log.warning(f"Invalid FNumber in "
+                                f"{file.original_filename}: "
+                                f"{exif[EXIF_FNUMBER]}")
+
             log.debug(f"File '{file.original_filename}': "
                       f"timestamp={file.timestamp}; "
                       f"exposure={file.exposure_time}; "
                       f"has GPS info = {file.has_gps}; "
                       f"picture style = {file.picture_style}; "
-                      f"color temp = {file.color_temperature}")
+                      f"color temp = {file.color_temperature}; "
+                      f"lens = {file.lens_model}; "
+                      f"focal = {file.focal_length}mm; "
+                      f"aperture = f/{file.aperture}")
         else:
             log.debug(f"File '{file.original_filename}' "
                       f"not identified as image (=> not checking EXIF data for timestamp, exposure time, or GPS info).")

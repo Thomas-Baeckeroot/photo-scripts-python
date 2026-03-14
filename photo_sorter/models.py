@@ -27,6 +27,9 @@ class ImageFile:
     group_type: Optional[str] = None    # Group type: "panorama", "hdr", "focus", "group"
     picture_style: Optional[str] = None # Canon PictureStyle (Standard, Portrait, Landscape, ...)
     color_temperature: Optional[int] = None  # Color temperature in Kelvin (from EXIF)
+    lens_model: Optional[str] = None         # EXIF LensModel (e.g. "RF-S18-45mm F4.5-6.3 IS STM")
+    focal_length: Optional[float] = None     # Focal length in mm (from EXIF)
+    aperture: Optional[float] = None         # F-number (from EXIF FNumber)
 
 
 @dataclass(order=True)

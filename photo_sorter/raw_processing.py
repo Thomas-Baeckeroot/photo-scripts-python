@@ -20,6 +20,7 @@ from PIL import Image
 
 from photo_sorter.config import AppConfig
 from photo_sorter.constants import DEFAULT_DCP_PROFILE_DIR
+from photo_sorter.lens_correction import apply_lens_correction
 from photo_sorter.metadata import copy_exif_from_raw
 from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
                                        apply_lookup_table, parse_dcp_lookup_table,
@@ -42,7 +43,8 @@ COLORSPACE_MAP = {
 def develop_raw(raw_file_path, output_path, output_format="avif",
                 output_bps=8, output_colorspace="srgb",
                 dark_frame_path=None, tone_curve=None, lookup_table=None,
-                color_correction_matrix=None):
+                color_correction_matrix=None,
+                lens_correction_params=None):
     """
     Develop a RAW file using rawpy (Python binding for libraw).
 
@@ -85,6 +87,9 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                             correction. Compensates for rawpy using D65-only ColorMatrix
                             when the scene illuminant is non-D65 (e.g. tungsten 3700K).
                             Applied in linear sRGB space. None at D65 (no correction needed).
+        lens_correction_params: Optional dict with keys 'lens_model', 'focal_length',
+                            'aperture' for lensfun-based lens correction (distortion,
+                            vignetting, TCA). None to skip lens correction.
 
     Returns:
         True if the image was created successfully, False otherwise.
@@ -147,6 +152,14 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
 
         # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
         log.debug(f" ┊                 Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
+
+        # Lens correction: distortion, vignetting, TCA (before color processing).
+        # Applied here because: (a) distortion remap must happen before any color
+        # corrections to avoid interpolating across color-corrected boundaries,
+        # (b) vignetting operates on linear light which is recovered internally.
+        if lens_correction_params is not None:
+            rgb = apply_lens_correction(rgb, **lens_correction_params)
+            log.debug(f" ┊                 After lens correction: {rgb.shape}, dtype={rgb.dtype}")
 
         # DCP processing order follows the DNG specification:
         #   1. LookTable (Phase 2) — fine-grained HSV corrections in LINEAR space
@@ -274,7 +287,8 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config,
 
 def create_avif_from_raw_file(photo_folder, file_entry, app_config,
                              tone_curve=None, lookup_table=None,
-                             color_correction_matrix=None):
+                             color_correction_matrix=None,
+                             lens_correction_params=None):
     """
     Create an AVIF image from a RAW file for individual images (not in groups).
 
@@ -293,6 +307,8 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config,
         lookup_table: Optional (90, 16, 16, 3) numpy array of HSV corrections (Phase 2)
         color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
                                  correction. None for D65 (daylight) scenes.
+        lens_correction_params: Optional dict with 'lens_model', 'focal_length', 'aperture'
+                                for lensfun-based lens correction. None to skip.
 
     Returns:
         ImageFile: Updated file entry with processed file info
@@ -312,6 +328,7 @@ def create_avif_from_raw_file(photo_folder, file_entry, app_config,
         tone_curve=tone_curve,
         lookup_table=lookup_table,
         color_correction_matrix=color_correction_matrix,
+        lens_correction_params=lens_correction_params,
     )
 
     if success:
@@ -336,6 +353,15 @@ def create_processed_images(photo_folder, files, app_config):
         list[ImageFile]: Updated list
     """
     log.debug("START .create_processed_images()")
+
+    def _build_lens_params(file_entry):
+        """Build lens correction params dict from ImageFile fields, or None."""
+        if (file_entry.lens_model and file_entry.focal_length
+                and file_entry.aperture):
+            return dict(lens_model=file_entry.lens_model,
+                        focal_length=file_entry.focal_length,
+                        aperture=file_entry.aperture)
+        return None
 
     # DCP profile loading strategy:
     # - Explicit path in config → single profile for all images (existing behavior)
@@ -378,14 +404,17 @@ def create_processed_images(photo_folder, files, app_config):
                         lookup_table=lookup_table,
                         color_correction_matrix=ccm)
                 else:
+                    lcp = _build_lens_params(file_entry)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
                               f"for individual image "
                               f"(color_temp={file_entry.color_temperature}K, "
-                              f"ccm={'yes' if ccm is not None else 'no'})")
+                              f"ccm={'yes' if ccm is not None else 'no'}, "
+                              f"lens={'yes' if lcp else 'no'})")
                     create_avif_from_raw_file(photo_folder, file_entry, app_config,
                                              tone_curve=tone_curve,
                                              lookup_table=lookup_table,
-                                             color_correction_matrix=ccm)
+                                             color_correction_matrix=ccm,
+                                             lens_correction_params=lcp)
 
     # Mode 2: Auto-detect → per-image DCP profile based on EXIF PictureStyle
     elif os.path.isdir(DEFAULT_DCP_PROFILE_DIR):
@@ -417,13 +446,16 @@ def create_processed_images(photo_folder, files, app_config):
                         lookup_table=lut,
                         color_correction_matrix=ccm)
                 else:
+                    lcp = _build_lens_params(file_entry)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
                               f"(PictureStyle='{style}', "
                               f"color_temp={file_entry.color_temperature}K, "
-                              f"ccm={'yes' if ccm is not None else 'no'})")
+                              f"ccm={'yes' if ccm is not None else 'no'}, "
+                              f"lens={'yes' if lcp else 'no'})")
                     create_avif_from_raw_file(photo_folder, file_entry, app_config,
                                              tone_curve=tc, lookup_table=lut,
-                                             color_correction_matrix=ccm)
+                                             color_correction_matrix=ccm,
+                                             lens_correction_params=lcp)
 
     # Mode 3: No DCP available → BT.709 only (no tone curve, no LUT)
     else:
@@ -434,8 +466,11 @@ def create_processed_images(photo_folder, files, app_config):
                               f"for group '{file_entry.group_id}'")
                     file_entry = create_tiff_16bit_from_raw(photo_folder, file_entry, app_config)
                 else:
+                    lcp = _build_lens_params(file_entry)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
-                              f"for individual image (no DCP)")
-                    create_avif_from_raw_file(photo_folder, file_entry, app_config)
+                              f"for individual image (no DCP, "
+                              f"lens={'yes' if lcp else 'no'})")
+                    create_avif_from_raw_file(photo_folder, file_entry, app_config,
+                                             lens_correction_params=lcp)
 
     return files
