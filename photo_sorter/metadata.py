@@ -97,6 +97,10 @@ def copy_exif_from_raw(raw_path, output_path):
     viewers and DAM software (e.g. DigiKam) can display photo properties for
     files generated from RAW (AVIF, TIFF).
 
+    The Orientation tag is forced to 1 (normal) because the pixel data has
+    already been rotated to the correct orientation during RAW development.
+    Without this override, viewers would double-rotate portrait images.
+
     Tags that are not writable in the target format are silently skipped by
     exiftool. The output file is modified in-place (-overwrite_original).
 
@@ -112,6 +116,7 @@ def copy_exif_from_raw(raw_path, output_path):
             ["exiftool",
              "-TagsFromFile", raw_path,
              "-all:all",
+             "-Orientation=1",
              "-overwrite_original",
              output_path],
             stdout=subprocess.PIPE,
