@@ -114,6 +114,7 @@ def copy_exif_from_raw(raw_path, output_path):
     try:
         result = subprocess.run(
             ["exiftool",
+             "-n",
              "-TagsFromFile", raw_path,
              "-all:all",
              "-Orientation=1",

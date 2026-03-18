@@ -110,14 +110,6 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     try:
         with rawpy.imread(raw_file_path) as raw:
 
-            # Capture sensor orientation before closing the raw file.
-            # rawpy/libraw's flip values: 0=normal, 3=180°, 5=90°CCW, 6=90°CW.
-            # rawpy.postprocess() returns pixels in sensor orientation (always
-            # landscape), ignoring the camera's rotation. We apply the rotation
-            # ourselves after all pixel processing so the saved file has correct
-            # orientation regardless of viewer EXIF support.
-            raw_flip = raw.sizes.flip
-
             # Use 16-bit internal processing whenever any DCP correction is applied
             # (tone curve, LUT, or color correction matrix). This preserves maximum
             # precision through the correction pipeline before final downsampling.
@@ -210,15 +202,6 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
             elif output_bps == 8 and rgb.dtype == np.uint16:
                 rgb = (rgb >> 8).astype(np.uint8)
                 log.debug(f" ┊                 Downsampled to 8-bit: dtype={rgb.dtype}")
-
-        # Apply orientation rotation so the saved file has correct orientation
-        # without depending on viewer EXIF Orientation tag support.
-        if raw_flip == 3:
-            rgb = np.rot90(rgb, 2)  # 180°
-        elif raw_flip == 5:
-            rgb = np.rot90(rgb, 1)  # 90° CCW
-        elif raw_flip == 6:
-            rgb = np.rot90(rgb, 3)  # 90° CW (= 270° CCW)
 
         if output_format == "avif":
             if output_bps >= 10 and rgb.dtype == np.uint16:
