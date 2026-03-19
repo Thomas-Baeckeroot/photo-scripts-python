@@ -27,6 +27,7 @@ from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
                                        apply_color_correction,
                                        compute_color_correction_matrix,
                                        parse_dcp_color_matrices,
+                                       _bt709_encode,
                                        DcpProfileCache)
 from photo_sorter.display import log_title
 
@@ -52,17 +53,30 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     the previous subprocess calls to dcraw_emu with a native Python approach,
     giving direct control over demosaicing parameters.
 
-    The processing pipeline is:
+    Two processing pipelines are available, selected automatically:
+
+    **Linear pipeline** (when DCP corrections are available):
         1. Load RAW Bayer data (rawpy.imread)
         2. Optionally subtract dark frame (hot/dead pixel correction)
-        3. Demosaic with AHD algorithm (same as dcraw -q 3)
-        4. Apply camera white balance
-        5. Convert to target colorspace with BT.709 gamma
-        6. Optionally apply Phase 3 color correction (illuminant-interpolated ColorMatrix)
-        7. Optionally apply DCP 3D LookTable (Phase 2) for fine-grained HSV corrections
-        8. Optionally apply DCP tone curve (Phase 1) as contrast/color enhancement
-        9. Downsample to requested bit depth (10-bit for AVIF, 16-bit for TIFF)
-       10. Save as AVIF (imagecodecs for 10-bit, Pillow for 8-bit) or TIFF
+        3. Demosaic with AHD algorithm, output LINEAR 16-bit sRGB (gamma=(1,1))
+        4. Optionally apply lens correction (distortion, vignetting, TCA)
+        5. Phase 3: illuminant-interpolated ColorMatrix correction (linear sRGB)
+        6. Phase 2: DCP 3D LookTable in ProPhoto HSV (linear domain)
+        7. Phase 1: DCP ProfileToneCurve on LINEAR data (per DNG specification)
+        8. BT.709 gamma encoding (explicit, after tone curve)
+        9. Downsample to 10-bit and save as AVIF
+       For TIFF output (panorama/HDR): steps 7-8 are skipped, data stays linear
+       for correct blending behavior in enblend.
+
+    **BT.709 pipeline** (no DCP corrections):
+        1-4 same as above, but rawpy outputs with BT.709 gamma encoding
+        5. Save directly as AVIF or TIFF
+
+    The linear pipeline follows the DNG specification processing order: the
+    ProfileToneCurve operates on linear scene-referred data, mapping to
+    output-referred values. Applying it to BT.709-encoded data (as was done
+    previously) causes double-compression of highlights and reduced saturation,
+    especially visible in high-contrast scenes.
 
     Args:
         raw_file_path:      Full path to the RAW file (.CR3, .CR2, .NEF, etc.)
@@ -75,14 +89,13 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                             at the same ISO/exposure/temperature. Subtracted from raw Bayer
                             data before demosaicing to eliminate hot/dead pixels.
         tone_curve:         Optional Nx2 numpy array of tone curve control points
-                            (from dcp_profile.parse_dcp_tone_curve). When provided:
-                            - rawpy outputs BT.709-encoded 16-bit data
-                            - DCP curve is applied on top as contrast/color enhancement
-                            - this "DCP on BT.709" approach matches camera JPEG brightness
-                            - result is then downsampled to the requested bit depth
+                            (from dcp_profile.parse_dcp_tone_curve). When provided,
+                            rawpy outputs linear data and the curve is applied per the
+                            DNG specification (on linear scene-referred values). BT.709
+                            gamma encoding is then applied explicitly.
         lookup_table:       Optional (90, 16, 16, 3) numpy array of HSV corrections
                             (from dcp_profile.parse_dcp_lookup_table). Applied BEFORE
-                            tone curve via trilinear interpolation in HSV space.
+                            tone curve via trilinear interpolation in ProPhoto HSV space.
         color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
                             correction. Compensates for rawpy using D65-only ColorMatrix
                             when the scene illuminant is non-D65 (e.g. tungsten 3700K).
@@ -110,34 +123,37 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
     try:
         with rawpy.imread(raw_file_path) as raw:
 
-            # Use 16-bit internal processing whenever any DCP correction is applied
-            # (tone curve, LUT, or color correction matrix). This preserves maximum
-            # precision through the correction pipeline before final downsampling.
-            #
-            # When a DCP tone curve is provided, the "DCP on BT.709" approach
-            # produces brightness and contrast that closely match the camera's
-            # in-body JPEG rendering ("Camera Standard").
-            # Tested against Canon EOS R7 reference JPEGs: mean luminance within 3%.
+            # When DCP corrections are available, use LINEAR output from rawpy.
+            # This is critical for correct tone curve application per the DNG
+            # specification: the ProfileToneCurve operates on linear scene-referred
+            # data, not on gamma-encoded data. Applying it to BT.709 data causes
+            # double-compression of highlights and reduced saturation.
+            # Linear output also benefits TIFF panorama/HDR: enblend produces
+            # better seam blending on linear data (no gamma-space artifacts).
             has_corrections = (tone_curve is not None or lookup_table is not None
                                or color_correction_matrix is not None)
             if has_corrections:
                 internal_bps = 16
+                gamma = (1, 1)          # Linear: corrections operate in linear space
+                use_linear = True
             else:
                 internal_bps = output_bps
+                gamma = (2.222, 4.5)    # BT.709: no corrections, encode directly
+                use_linear = False
 
-            gamma = (2.222, 4.5)        # BT.709
-            no_auto_bright = False
-
-            # Build postprocess parameters (factored to avoid duplication)
+            # Build postprocess parameters
             params_kwargs = dict(
                 use_camera_wb=True,                              # -w : camera white balance
-                highlight_mode=rawpy.HighlightMode.Clip,         # -H 1 : clip highlights cleanly
+                highlight_mode=rawpy.HighlightMode.Blend,        # -H 2 : blend highlights for
+                                                                 # smoother transition to white
+                                                                 # in high-contrast scenes
                 output_color=colorspace,                         # -o : target colorspace
-                output_bps=internal_bps,                         # bits per sample (16 for tone curve path)
+                output_bps=internal_bps,                         # bits per sample
                 demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,  # -q 3 : best quality
                 fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Light,  # -fbdd 1
                 gamma=gamma,
-                no_auto_bright=no_auto_bright,
+                no_auto_bright=False,                            # auto-bright for proper
+                                                                 # histogram normalization
             )
 
             # Dark frame subtraction: applied on raw Bayer data before demosaicing
@@ -151,48 +167,56 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
             rgb = raw.postprocess(params)
 
         # rgb is a numpy array of shape (height, width, 3), dtype uint8 or uint16
-        log.debug(f" ┊                 Demosaiced image: {rgb.shape}, dtype={rgb.dtype}")
+        log.debug(f" ┊                 Demosaiced image: {rgb.shape}, dtype={rgb.dtype}, "
+                  f"pipeline={'linear' if use_linear else 'bt709'}")
 
         # Lens correction: distortion, vignetting, TCA (before color processing).
         # Applied here because: (a) distortion remap must happen before any color
         # corrections to avoid interpolating across color-corrected boundaries,
-        # (b) vignetting operates on linear light which is recovered internally.
+        # (b) vignetting correction needs linear light (handled internally).
         if lens_correction_params is not None:
-            rgb = apply_lens_correction(rgb, **lens_correction_params)
+            rgb = apply_lens_correction(rgb, **lens_correction_params,
+                                        input_linear=use_linear)
             log.debug(f" ┊                 After lens correction: {rgb.shape}, dtype={rgb.dtype}")
 
         # DCP processing order follows the DNG specification:
-        #   1. LookTable (Phase 2) — fine-grained HSV corrections in LINEAR space
-        #   2. ToneCurve (Phase 1) — contrast/color S-curve on BT.709 data
+        #   Phase 3: ColorMatrix correction (linear sRGB)
+        #   Phase 2: LookTable HSV corrections (linear sRGB → ProPhoto → HSV → back)
+        #   Phase 1: ProfileToneCurve (linear → tone-mapped, per DNG spec)
+        #   BT.709:  Gamma encoding for display (explicit, after tone curve)
         #
-        # The LookTable must be applied BEFORE the ToneCurve because:
-        # - The DNG spec applies LUT on linear data, then ToneCurve converts to perceptual
-        # - Applying LUT after ToneCurve causes over-brightening (corrections compound
-        #   with the S-curve's contrast boost in doubly-nonlinear space)
-        #
-        # Since rawpy outputs BT.709-encoded data, we linearize (invert BT.709 gamma)
-        # before the LUT, then re-encode BT.709 for the ToneCurve.
+        # In the linear pipeline, all corrections operate natively in linear space
+        # (no BT.709 linearize/re-encode round-trips needed).
 
         # Phase 3 + Phase 2: Apply in linear sRGB space (before tone curve).
         # Phase 3 (color correction matrix) is applied inside apply_lookup_table()
         # when a LUT is present, or standalone via apply_color_correction() otherwise.
-        # Both operations happen in linear sRGB space (BT.709 linearized).
         if lookup_table is not None:
-            rgb = apply_lookup_table(rgb, lookup_table, linearize_bt709=True,
+            rgb = apply_lookup_table(rgb, lookup_table, input_linear=use_linear,
                                      color_correction_matrix=color_correction_matrix)
-            log.debug(f" ┊                 After Phase 3+2 (linear): {rgb.shape}, dtype={rgb.dtype}")
+            log.debug(f" ┊                 After Phase 3+2: {rgb.shape}, dtype={rgb.dtype}")
         elif color_correction_matrix is not None:
             # Phase 3 only (no LUT): apply color correction standalone
             rgb = apply_color_correction(rgb, color_correction_matrix,
-                                         linearize_bt709=True)
+                                         input_linear=use_linear)
             log.debug(f" ┊                 After Phase 3 (standalone): {rgb.shape}, dtype={rgb.dtype}")
 
-        # Phase 1: Apply DCP tone curve as contrast/color enhancement on BT.709 data.
-        # The S-curve adds depth and saturation matching the camera manufacturer's
-        # in-body JPEG rendering ("Camera Standard" profile).
+        # Phase 1: Apply DCP ProfileToneCurve on LINEAR data (per DNG spec).
+        # The curve maps linear scene-referred values to output-referred values,
+        # providing the camera manufacturer's contrast and color rendering.
         if tone_curve is not None:
             rgb = apply_tone_curve(rgb, tone_curve)
             log.debug(f" ┊                 After tone curve: {rgb.shape}, dtype={rgb.dtype}")
+
+        # BT.709 gamma encoding: required for display output (AVIF).
+        # In the linear pipeline, the tone curve provides tone mapping but not
+        # gamma encoding. We add BT.709 encoding explicitly for AVIF output.
+        # For TIFF: data stays linear (better for panorama/HDR blending in enblend).
+        if use_linear and output_format == "avif":
+            rgb_float = rgb.astype(np.float64) / 65535.0
+            rgb_float = _bt709_encode(rgb_float)
+            rgb = np.clip(rgb_float * 65535.0, 0, 65535).astype(np.uint16)
+            log.debug(f" ┊                 After BT.709 encoding: max={rgb.max()}")
 
         # Downsample from internal 16-bit to requested output depth if needed
         if internal_bps > output_bps:
@@ -205,16 +229,16 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
 
         if output_format == "avif":
             if output_bps >= 10 and rgb.dtype == np.uint16:
-                # 10-bit or 12-bit AVIF via imagecodecs (Pillow only supports 8-bit)
-                # level=80 for lossy quality (default is lossless → huge files)
-                avif_data = avif_encode(rgb, level=80, speed=6,
+                # 10-bit AVIF via imagecodecs (Pillow only supports 8-bit).
+                # quality=92 for high-fidelity photographic output.
+                avif_data = avif_encode(rgb, level=92, speed=6,
                                         bitspersample=output_bps)
                 with open(output_path, 'wb') as f:
                     f.write(avif_data)
             else:
                 # 8-bit RGB → Pillow handles this fine
                 img = Image.fromarray(rgb)
-                img.save(output_path, 'AVIF', quality=80, speed=6)
+                img.save(output_path, 'AVIF', quality=92, speed=6)
         elif output_format == "tiff":
             # 16-bit RGB → Pillow cannot save uint16 RGB, use tifffile instead
             tifffile.imwrite(output_path, rgb, photometric='rgb')

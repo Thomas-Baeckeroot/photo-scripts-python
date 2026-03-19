@@ -224,12 +224,12 @@ def compute_color_correction_matrix(cm1, cm2, temp1, temp2, scene_temp):
     return correction
 
 
-def apply_color_correction(rgb, correction_matrix, linearize_bt709=False):
+def apply_color_correction(rgb, correction_matrix, input_linear=False):
     """
     Apply a 3×3 color correction matrix to an RGB image (standalone).
 
     Used when Phase 3 correction is needed but no LookTable (Phase 2) is
-    available. Handles linearization/re-encoding internally.
+    available. The matrix operates in linear sRGB space.
 
     The matrix multiply: pixel_out = correction_matrix @ pixel_in
     where pixel_in/pixel_out are (3,) vectors in linear sRGB.
@@ -237,7 +237,9 @@ def apply_color_correction(rgb, correction_matrix, linearize_bt709=False):
     Args:
         rgb:                (H, W, 3) numpy array, dtype uint8 or uint16.
         correction_matrix:  (3, 3) numpy float64 array.
-        linearize_bt709:    If True, invert BT.709 before and re-encode after.
+        input_linear:       If True, input is already linear sRGB. If False,
+                            input is BT.709-encoded: linearize before and
+                            re-encode after. Output encoding matches input.
 
     Returns:
         (H, W, 3) array, same dtype as input, with correction applied.
@@ -253,14 +255,14 @@ def apply_color_correction(rgb, correction_matrix, linearize_bt709=False):
     original_dtype = rgb.dtype
     rgb_norm = rgb.astype(np.float64) / max_val
 
-    if linearize_bt709:
+    if not input_linear:
         rgb_norm = _bt709_linearize(rgb_norm)
 
     # Apply 3×3 matrix: 'ij,hwj->hwi' = matrix[i,j] × pixel[h,w,j] → result[h,w,i]
     rgb_corrected = np.einsum('ij,hwj->hwi', correction_matrix, rgb_norm)
     rgb_corrected = np.clip(rgb_corrected, 0.0, 1.0)
 
-    if linearize_bt709:
+    if not input_linear:
         rgb_corrected = _bt709_encode(rgb_corrected)
 
     rgb_out = np.clip(rgb_corrected * max_val, 0, max_val)
@@ -460,19 +462,24 @@ def build_tone_curve_lut(curve_points, max_value):
 
 def apply_tone_curve(rgb, tone_curve_points):
     """
-    Apply a DCP tone curve to a linear RGB image.
+    Apply a DCP ProfileToneCurve to an RGB image.
 
-    Builds a LUT at the image's bit depth, then maps every pixel through it
-    via numpy fancy indexing (applied identically to R, G, B channels, as
-    specified by the DNG standard for ProfileToneCurve).
+    Per the DNG specification, the ProfileToneCurve operates on linear
+    scene-referred data. It maps linear sensor values to output-referred
+    (display-ready) values, replacing the standard gamma encoding with the
+    camera manufacturer's own contrast/color curve.
 
-    The tone curve converts linear sensor values to perceptual (display-ready)
-    values, replacing rawpy's default BT.709 gamma with the camera's own
-    contrast curve.
+    The curve is applied identically to R, G, B channels via a precomputed
+    integer LUT (numpy fancy indexing).
+
+    After this function, the output still needs BT.709 gamma encoding for
+    display — the tone curve handles contrast/tone mapping but does not
+    include the final gamma encoding.
 
     Args:
         rgb:                numpy array (H, W, 3), dtype uint8 or uint16.
-                            Must contain LINEAR values (rawpy gamma=(1,1)).
+                            Should contain LINEAR values (rawpy gamma=(1,1))
+                            for correct DNG-spec behavior.
         tone_curve_points:  Nx2 numpy array from parse_dcp_tone_curve().
 
     Returns:
@@ -782,14 +789,14 @@ def _bt709_encode(rgb_linear):
     )
 
 
-def apply_lookup_table(rgb, lut, linearize_bt709=False,
+def apply_lookup_table(rgb, lut, input_linear=False,
                        color_correction_matrix=None):
     """
     Apply 3D HSV lookup table to an RGB image.
 
     Orchestrates the complete process:
         1. Normalize RGB from [0, max] to [0, 1]
-        2. Optionally linearize (invert BT.709 gamma) for correct LUT domain
+        2. If BT.709 input: linearize (invert gamma) to recover linear RGB
         3. Optionally apply Phase 3 color correction matrix (in linear sRGB)
         4. Convert linear sRGB → linear ProPhoto RGB (correct LUT domain)
         5. Convert ProPhoto RGB → HSV
@@ -797,41 +804,42 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
         7. Convert HSV → ProPhoto RGB
         8. Compensate mean brightness shift from saturation corrections
         9. Convert linear ProPhoto → linear sRGB
-       10. Optionally re-encode BT.709 gamma
+       10. If BT.709 input: re-encode BT.709 gamma
        11. Denormalize RGB back to original range and clamp
 
-    **ProPhoto color space**: The DNG specification defines the LookTable to
-    operate in RIMM/ProPhoto RGB (ISO 22028-2, D50 white point). Applying the
-    LUT in sRGB produces incorrect hue shifts because the same spectral color
-    has different HSV coordinates in sRGB vs ProPhoto. For example, amber
-    (tungsten-lit scenes) maps to ~27° hue in sRGB but ~43° in ProPhoto,
-    causing the LUT to look up the wrong correction voxels.
+    The ProPhoto conversion (steps 4 and 9) is always performed regardless of
+    input encoding. The DNG specification defines the LookTable to operate in
+    RIMM/ProPhoto RGB (ISO 22028-2, D50 white point). Applying the LUT in sRGB
+    produces incorrect hue shifts because the same spectral color has different
+    HSV coordinates in sRGB vs ProPhoto. For example, amber (tungsten-lit scenes)
+    maps to ~27° hue in sRGB but ~43° in ProPhoto, causing the LUT to look up
+    the wrong correction voxels.
 
     **Phase 3 color correction**: When `color_correction_matrix` is provided,
-    it is applied in linear sRGB space (after linearization, before ProPhoto
-    conversion). This corrects for rawpy/libraw's D65-only ColorMatrix under
-    non-D65 illuminants (e.g., tungsten at 3700K). At D65, the matrix is None
-    (identity), so daylight images are unaffected.
+    it is applied in linear sRGB space (before ProPhoto conversion). This
+    corrects for rawpy/libraw's D65-only ColorMatrix under non-D65 illuminants
+    (e.g., tungsten at 3700K). At D65, the matrix is None (identity), so
+    daylight images are unaffected.
 
     **Brightness compensation**: The LUT's saturation corrections (desaturation)
     increase apparent RGB luminance after HSV→RGB conversion, because lower
-    saturation moves colors toward gray (higher mean RGB). In the standard DNG
-    pipeline, the ToneCurve is calibrated to account for this. In our approximate
-    "DCP on BT.709" pipeline, we compensate by normalizing the mean brightness
-    back to the pre-LUT level, preserving all color corrections while preventing
-    the brightness shift.
+    saturation moves colors toward gray (higher mean RGB). We compensate by
+    normalizing the mean brightness back to the pre-LUT level, preserving all
+    color corrections while preventing the brightness shift.
 
     Args:
         rgb: (H, W, 3) numpy array, dtype uint8 or uint16.
         lut: (90, 16, 16, 3) lookup table from parse_dcp_lookup_table().
-        linearize_bt709: If True, invert BT.709 gamma before LUT application
-                         and re-encode after. Required when input is BT.709-encoded.
+        input_linear: If True, input is already linear sRGB (from rawpy with
+                      gamma=(1,1)). If False, input is BT.709-encoded and will
+                      be linearized before processing and re-encoded after.
         color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
                                  correction. Applied in linear sRGB before ProPhoto
                                  conversion.
 
     Returns:
         (H, W, 3) array, same dtype as input, with LUT corrections applied.
+        Output encoding matches input: linear in → linear out, BT.709 in → BT.709 out.
     """
     if rgb.dtype == np.uint8:
         max_val = 255.0
@@ -846,9 +854,11 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
     # Normalize RGB to [0, 1]
     rgb_norm = rgb.astype(np.float64) / max_val
 
-    # Optionally linearize: invert BT.709 gamma to recover linear RGB
-    if linearize_bt709:
+    # If BT.709 input: linearize to recover linear sRGB for color processing
+    if not input_linear:
         rgb_norm = _bt709_linearize(rgb_norm)
+
+    # At this point, rgb_norm is always linear sRGB [0, 1]
 
     # Phase 3: Apply color correction matrix in linear sRGB space.
     # This corrects for rawpy using only the D65 ColorMatrix (CM2) when the
@@ -860,15 +870,10 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
         log.debug(" ┊      Phase 3 color correction applied (in linear sRGB)")
 
     # Convert linear sRGB → linear ProPhoto RGB for correct LUT domain.
-    # The DNG LookTable is designed for ProPhoto (RIMM) primaries — applying it
-    # in sRGB causes incorrect hue shifts (e.g., amber 27° in sRGB → 43° in
-    # ProPhoto, which hits very different LUT voxels).
-    if linearize_bt709:
-        rgb_prophoto = np.einsum('ij,hwj->hwi', M_SRGB_TO_PROPHOTO, rgb_norm)
-        rgb_prophoto = np.clip(rgb_prophoto, 0.0, 1.0)
-        log.debug(" ┊      Converted to ProPhoto RGB for LUT application")
-    else:
-        rgb_prophoto = rgb_norm
+    # Always performed: the DNG LookTable is designed for ProPhoto primaries.
+    rgb_prophoto = np.einsum('ij,hwj->hwi', M_SRGB_TO_PROPHOTO, rgb_norm)
+    rgb_prophoto = np.clip(rgb_prophoto, 0.0, 1.0)
+    log.debug(" ┊      Converted to ProPhoto RGB for LUT application")
 
     # Record mean brightness before LUT for compensation (in ProPhoto space)
     mean_before = rgb_prophoto.mean()
@@ -893,14 +898,13 @@ def apply_lookup_table(rgb, lut, linearize_bt709=False,
         log.debug(f" ┊      LUT brightness compensation: "
                   f"ratio={brightness_ratio:.4f} (1.0 = no change)")
 
-    # Convert linear ProPhoto → linear sRGB (inverse of the earlier conversion)
-    if linearize_bt709:
-        rgb_corrected = np.einsum('ij,hwj->hwi', M_PROPHOTO_TO_SRGB, rgb_corrected)
-        rgb_corrected = np.clip(rgb_corrected, 0.0, 1.0)
-        log.debug(" ┊      Converted back to sRGB from ProPhoto")
+    # Convert linear ProPhoto → linear sRGB
+    rgb_corrected = np.einsum('ij,hwj->hwi', M_PROPHOTO_TO_SRGB, rgb_corrected)
+    rgb_corrected = np.clip(rgb_corrected, 0.0, 1.0)
+    log.debug(" ┊      Converted back to sRGB from ProPhoto")
 
-    # Optionally re-encode BT.709 gamma
-    if linearize_bt709:
+    # If BT.709 input: re-encode gamma to match input encoding
+    if not input_linear:
         rgb_corrected = _bt709_encode(rgb_corrected)
 
     # Denormalize and clamp

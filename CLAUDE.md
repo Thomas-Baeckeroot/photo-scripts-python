@@ -174,20 +174,27 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
 - [x] Réécrire `create_panorama.py` avec hsi (Hugin Python bindings) pour automatisation panorama (Linux x86_64)
 
 - [x] **Couleurs fades — Phase 1 : Tone curve DCP + AVIF 10-bit (CR3 → AVIF)**
-  Implémenté dans `dcp_profile.py` + `raw_processing.py`. Approche "DCP on BT.709" :
-  rawpy produit une image BT.709 en 16-bit, puis la courbe DCP "Camera Standard" est
-  appliquée par-dessus comme rehaussement de contraste/couleur (pas en remplacement du gamma).
-  Luminosité Phase 1 seule : mean=101.8 vs caméra=104.6 sur IMG_2378 (diff: 2.8).
-  Avec Phases 2+3 (LUT S+V + ProPhoto + compensation + ColorMatrix) : mean=102.9 vs 104.6
-  (diff: 1.7). G/R=0.7388 vs caméra 0.6881 (erreur 7.4%, amélioré de 15.3% avec Phase 2 v1).
-  - Sortie AVIF 10-bit via `imagecodecs.avif_encode(bitspersample=10)` pour préserver les
-    nuances dans les dégradés (Pillow ne supporte que 8-bit)
+  Implémenté dans `dcp_profile.py` + `raw_processing.py`.
+
+  **Pipeline linéaire** (conforme à la spécification DNG Adobe) :
+  Quand des corrections DCP sont disponibles, rawpy produit une image **linéaire** 16-bit
+  (`gamma=(1,1)`). La ProfileToneCurve est appliquée sur ces données linéaires conformément
+  à la spec DNG (scene-referred → output-referred). L'encodage gamma BT.709 est ensuite
+  ajouté explicitement pour la sortie AVIF display-ready.
+
+  L'ancienne approche "DCP on BT.709" (courbe appliquée sur données gamma-encodées) causait
+  une double-compression des hautes lumières et une saturation réduite, particulièrement
+  visible sur les scènes à fort contraste (intérieur avec fenêtre lumineuse).
+
+  - Sortie AVIF 10-bit via `imagecodecs.avif_encode(bitspersample=10, level=92)`
+    pour préserver les nuances dans les dégradés (Pillow ne supporte que 8-bit)
   - Auto-détection du profil dans `/Library/Application Support/Adobe/CameraRaw/CameraProfiles/Camera/Canon EOS R7/`
   - Configurable via `dcp_profile` dans `[Processing]` du fichier de config (`none` pour désactiver)
   - Phase 1 (ToneCurve) appliquée aux AVIF uniquement — les TIFF panorama/HDR reçoivent
     Phase 2+3 (LUT + CCM) pour des couleurs correctes, mais pas la ToneCurve (données
-    linéaires requises pour le blending enblend)
+    linéaires conservées pour le blending enblend)
   - Sans profil DCP : fallback AVIF 8-bit via Pillow avec BT.709 seul
+  - HighlightMode.Blend pour une transition douce vers le blanc dans les hautes lumières
 
 - [x] **Couleurs fades — Phase 2 : LookTable 3D du DCP**
   Implémenté dans `dcp_profile.py` : `parse_dcp_lookup_table()`, `apply_lookup_table_to_hsv()`,
@@ -195,15 +202,17 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   90×16×16 (hue × saturation × value) contenant 69 120 corrections HSV.
 
   **Ordre de traitement** (conforme à la spécification DNG Adobe) :
-  1. rawpy → image BT.709 16-bit (sRGB)
-  2. **Phase 3** : linéarisation BT.709 → matrice 3×3 correction ColorMatrix → clip
+  1. rawpy → image **linéaire** 16-bit sRGB (`gamma=(1,1)`)
+  2. **Phase 3** : matrice 3×3 correction ColorMatrix en sRGB linéaire → clip
   3. **Phase 2 (LookTable)** : sRGB linéaire → ProPhoto linéaire → HSV → LUT → RGB → sRGB linéaire
-  4. Ré-encodage BT.709
-  5. **Phase 1 (ToneCurve)** : courbe S sur données BT.709
+  4. **Phase 1 (ToneCurve)** : courbe S sur données **linéaires** (spec DNG)
+  5. Encodage BT.709 gamma explicite (pour AVIF display-ready)
+  Pour TIFF panorama/HDR : étapes 4-5 omises, données restent linéaires (meilleur blending).
 
-  Le LUT est appliqué **AVANT** la ToneCurve (spec DNG : LookTable opère sur données linéaires,
-  avant conversion perceptuelle). Pour cela, le gamma BT.709 est inversé avant le LUT
-  (`_bt709_linearize()`), puis ré-appliqué (`_bt709_encode()`).
+  Le pipeline linéaire élimine les conversions BT.709 aller-retour (`_bt709_linearize()` /
+  `_bt709_encode()`) lors du traitement : rawpy sort directement en linéaire, toutes les
+  corrections opèrent nativement en linéaire, et le gamma est ajouté une seule fois à la fin.
+  Paramètre `input_linear` dans `apply_lookup_table()` et `apply_color_correction()`.
 
   **Espace couleur ProPhoto** : le LUT du DCP est conçu pour l'espace ProPhoto/RIMM RGB
   (ISO 22028-2, point blanc D50). L'appliquer en sRGB produit des shifts de teinte incorrects
@@ -213,10 +222,8 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   calculées via Bradford CAT D65→D50.
 
   **Compensation de luminosité** : la désaturation HSV augmente la luminance RGB apparente
-  (les couleurs désaturées → plus proches du gris → mean RGB plus élevé). Dans le pipeline DNG
-  réel, la ToneCurve est calibrée pour cet effet. Dans notre approximation "DCP on BT.709",
-  on compense en normalisant le mean RGB après le LUT pour retrouver le niveau pré-LUT.
-  Résultat : mean=104.2 vs caméra=104.6 (diff: 0.4 — quasi parfait).
+  (les couleurs désaturées → plus proches du gris → mean RGB plus élevé). On compense en
+  normalisant le mean RGB après le LUT pour retrouver le niveau pré-LUT.
 
   Corrections retenues :
   - H correction : additive, **atténuée par h_scale** (défaut 0.0) — H_new = H + ΔH × h_scale
@@ -267,12 +274,12 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   - À 3700K : correction R+3%, B+9%, G quasi inchangé (via termes hors-diagonale)
 
   **Ordre de traitement** dans `develop_raw()` :
-  1. rawpy → BT.709 16-bit (sRGB)
-  2. Linéarisation BT.709
+  1. rawpy → **linéaire** 16-bit sRGB (`gamma=(1,1)`)
+  2. Correction optique (distorsion, vignettage, TCA) en linéaire
   3. **Phase 3** : matrice 3×3 correction ColorMatrix en sRGB linéaire → clip [0, 1]
   4. **Phase 2** : sRGB linéaire → ProPhoto linéaire → HSV → LookTable → RGB → sRGB linéaire
-  5. Ré-encodage BT.709
-  6. **Phase 1** : ToneCurve (courbe S sur données BT.709)
+  5. **Phase 1** : ToneCurve (courbe S sur données **linéaires**, spec DNG)
+  6. Encodage BT.709 gamma explicite (AVIF uniquement, pas TIFF)
 
   **Fichiers modifiés** :
   - `constants.py` : `ILLUMINANT_TEMP` — dict code DNG → Kelvin (17→2856K, 21→6504K, etc.)
