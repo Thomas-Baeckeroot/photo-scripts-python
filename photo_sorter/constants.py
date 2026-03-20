@@ -22,18 +22,18 @@ FOLDER_BACKUP_GPS = "BackupBeforeGPS!AE!"
 RC_ATTRIBUTES_ERROR = -1
 RC_PATH_ERROR = -2
 
-# Default DCP profile directory (Canon EOS R7, installed by Adobe Camera Raw / Lightroom).
+# Candidate directories for DCP profiles (Canon EOS R7).
+# The first existing directory is used for per-PictureStyle auto-detection.
 # Contains per-style DCP profiles: Camera Standard.dcp, Camera Portrait.dcp, etc.
-DEFAULT_DCP_PROFILE_DIR = (
+# FIXME Make this folder detected by script
+DCP_PROFILE_DIR_CANDIDATES = [
+    # macOS: Adobe Camera Raw / Lightroom system-wide install
     "/Library/Application Support/Adobe/CameraRaw/CameraProfiles/"
-    "Camera/Canon EOS R7/"
-)
-
-# Default DCP profile path (Canon EOS R7 "Camera Standard").
-# Used as fallback when PictureStyle is unknown or no per-style DCP found.
-DEFAULT_DCP_PROFILE_PATH = (
-    DEFAULT_DCP_PROFILE_DIR + "Canon EOS R7 Camera Standard.dcp"
-)
+    "Camera/Canon EOS R7/",
+    # Linux: macOS Library synced/copied to home directory
+    "~/macOS_Library/Application Support/Adobe/CameraRaw/CameraProfiles/"
+    "Camera/Canon EOS R7/",
+]
 
 # DNG CalibrationIlluminant code → approximate correlated color temperature (Kelvin).
 # From EXIF LightSource enum (used by the DNG specification for CalibrationIlluminant tags).

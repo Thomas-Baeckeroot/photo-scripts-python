@@ -19,7 +19,7 @@ from imagecodecs import avif_encode
 from PIL import Image
 
 from photo_sorter.config import AppConfig
-from photo_sorter.constants import DEFAULT_DCP_PROFILE_DIR
+from photo_sorter.constants import DCP_PROFILE_DIR_CANDIDATES
 from photo_sorter.lens_correction import apply_lens_correction
 from photo_sorter.metadata import copy_exif_from_raw
 from photo_sorter.dcp_profile import (apply_tone_curve, parse_dcp_tone_curve,
@@ -39,6 +39,65 @@ COLORSPACE_MAP = {
     'srgb': rawpy.ColorSpace.sRGB,           # Standard for web/screen display
     'prophoto': rawpy.ColorSpace.ProPhoto,    # Wide gamut (available but not used by default)
 }
+
+
+def _estimate_auto_bright_thr(raw):
+    """
+    Estimate optimal auto_bright_thr from raw Bayer data.
+
+    rawpy's auto_bright scales the image so that auto_bright_thr fraction of
+    pixels are clipped to white. The default (0.01 = 1%) is conservative: for
+    high-contrast scenes (dark interior with bright window), the few bright
+    window pixels saturate to white early, and auto_bright doesn't boost the
+    rest of the image. This leaves 95%+ of pixels severely underexposed.
+
+    Canon's Auto Lighting Optimizer (ALO) solves this by detecting high-contrast
+    scenes and applying aggressive shadow lifting. Since ALO is not stored in
+    DCP profiles, we compensate by increasing auto_bright_thr for high-contrast
+    scenes, allowing more highlight clipping and brighter overall exposure.
+
+    The threshold is computed per-image from the fraction of "outlier bright"
+    pixels (>10x the median). This fraction directly measures the bright tail
+    size (e.g., window in a dark room), and thr is set to clip most of it.
+
+    Args:
+        raw: rawpy.RawPy object (after imread, before postprocess)
+
+    Returns:
+        float: recommended auto_bright_thr (0.01 to 0.10)
+    """
+    visible = raw.raw_image_visible.astype(np.float32)
+    black = np.mean(raw.black_level_per_channel)
+    white = raw.white_level
+    visible = np.clip((visible - black) / (white - black), 0, 1)
+
+    p50 = np.median(visible)
+
+    if p50 < 0.001:
+        log.debug(f" ┊                 Scene analysis: p50={p50:.4f} "
+                  f"→ extremely dark, auto_bright_thr=0.10")
+        return 0.10
+
+    # Compute fraction of pixels that are "outlier bright" (>10x median).
+    # For indoor high-contrast scenes, this captures the bright window/sky area.
+    # Empirical data:
+    #   Outdoor scenes: outlier_frac ≈ 1.5-2% → thr stays at 0.01
+    #   Indoor with window: outlier_frac ≈ 4.5-5% → thr ≈ 0.035-0.045
+    outlier_frac = (visible > p50 * 10).mean()
+
+    if outlier_frac > 0.02:
+        # High-contrast scene: set thr to clip most of the bright outliers.
+        # Factor 0.85 is empirically tuned: clipping 85% of the outlier tail
+        # provides the right balance between shadow lifting and highlight
+        # preservation after the DCP tone curve + BT.709 pipeline.
+        thr = min(outlier_frac * 0.85, 0.10)
+    else:
+        thr = 0.01  # Normal/well-exposed scene
+
+    log.debug(f" ┊                 Scene analysis: p50={p50:.4f}, "
+              f"outlier_frac={outlier_frac:.4f} ({outlier_frac*100:.1f}%) "
+              f"→ auto_bright_thr={thr:.4f}")
+    return thr
 
 
 def develop_raw(raw_file_path, output_path, output_format="avif",
@@ -141,12 +200,18 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                 gamma = (2.222, 4.5)    # BT.709: no corrections, encode directly
                 use_linear = False
 
+            # Scene-adaptive auto_bright_thr: analyze the raw Bayer data to
+            # determine the scene's dynamic range and calculate the optimal
+            # highlight clipping threshold for auto-brightness normalization.
+            auto_thr = _estimate_auto_bright_thr(raw)
+
             # Build postprocess parameters
             params_kwargs = dict(
                 use_camera_wb=True,                              # -w : camera white balance
-                highlight_mode=rawpy.HighlightMode.Blend,        # -H 2 : blend highlights for
-                                                                 # smoother transition to white
-                                                                 # in high-contrast scenes
+                highlight_mode=rawpy.HighlightMode.Clip,         # -H 0 : clip highlights.
+                                                                 # Blend (-H 2) causes ~20%
+                                                                 # darkening on interior scenes
+                                                                 # via auto_bright interaction
                 output_color=colorspace,                         # -o : target colorspace
                 output_bps=internal_bps,                         # bits per sample
                 demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,  # -q 3 : best quality
@@ -154,6 +219,7 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                 gamma=gamma,
                 no_auto_bright=False,                            # auto-bright for proper
                                                                  # histogram normalization
+                auto_bright_thr=auto_thr,                        # scene-adaptive threshold
             )
 
             # Dark frame subtraction: applied on raw Bayer data before demosaicing
@@ -441,9 +507,13 @@ def create_processed_images(photo_folder, files, app_config):
                                              lens_correction_params=lcp)
 
     # Mode 2: Auto-detect → per-image DCP profile based on EXIF PictureStyle
-    elif os.path.isdir(DEFAULT_DCP_PROFILE_DIR):
-        dcp_cache = DcpProfileCache(DEFAULT_DCP_PROFILE_DIR)
-        log.info(f" ├→ DCP auto-detect: per-image profile selection from '{DEFAULT_DCP_PROFILE_DIR}'")
+    # Search candidate directories for DCP profiles
+    elif (dcp_dir := next(
+            (os.path.expanduser(d) for d in DCP_PROFILE_DIR_CANDIDATES
+             if os.path.isdir(os.path.expanduser(d))),
+            None)):
+        dcp_cache = DcpProfileCache(dcp_dir)
+        log.info(f" ├→ DCP auto-detect: per-image profile selection from '{dcp_dir}'")
 
         for file_entry in files:
             if file_entry.raw_filename and not file_entry.processed_filename:
@@ -483,6 +553,13 @@ def create_processed_images(photo_folder, files, app_config):
 
     # Mode 3: No DCP available → BT.709 only (no tone curve, no LUT)
     else:
+        log.warning(" ├→ No DCP profile directory found. AVIF output will use BT.709 gamma "
+                    "only (no tone curve, no color corrections). Images will appear darker "
+                    "and less saturated than camera JPEGs.")
+        log.warning(" ├→ To fix: set 'dcp_profile' in [Processing] section of "
+                    "~/.config/sort_photo.conf, or place DCP profiles in one of:")
+        for candidate in DCP_PROFILE_DIR_CANDIDATES:
+            log.warning(f" ├→   {candidate}")
         for file_entry in files:
             if file_entry.raw_filename and not file_entry.processed_filename:
                 if file_entry.group_id:

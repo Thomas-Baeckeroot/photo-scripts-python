@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-# Note: DEFAULT_DCP_PROFILE_DIR is used by raw_processing.py for per-PictureStyle
+# Note: DCP_PROFILE_DIR_CANDIDATES is used by raw_processing.py for per-PictureStyle
 # DCP profile auto-detection. config.py no longer auto-selects a specific DCP path.
 
 
