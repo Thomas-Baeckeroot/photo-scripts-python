@@ -57,6 +57,8 @@ photo-scripts-python/
 ├── requirements.txt
 ├── sort_photo.conf                 # Configuration (dossiers par défaut)
 ├── testing/                        # Données de test (CR3, JPG, GPX)
+├── docs/
+│   └── prise-de-vue-et-numerisation.md  # Guide qualité : bracketing HDR, scan négatifs
 └── CLAUDE.md
 ```
 
