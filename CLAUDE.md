@@ -143,7 +143,9 @@ class ImageFile:
 ```python
 RAW_EXTENSIONS = {'.crw', '.cr2', '.cr3', '.nef'}
 RENDERED_EXTENSIONS = {'.jpg', '.jpeg', '.heif', '.avif'}
-MIN_TIME_BETWEEN_PANOS = 15  # secondes entre photos d'un même groupe
+MIN_TIME_BETWEEN_PANOS = 15   # s — seuil "lâche" : série panorama
+MAX_TIME_WITHIN_BURST = 2.0   # s — seuil "serré" : burst HDR/focus (rafale)
+HDR_EXPOSURE_RATIO = 1.8      # ratio expo max/min → classer un burst en HDR
 ```
 
 ## Pipeline de traitement
@@ -153,7 +155,11 @@ MIN_TIME_BETWEEN_PANOS = 15  # secondes entre photos d'un même groupe
 3. `geotag_pictures()` - Géolocalisation via GPX
 4. `consolidate_images()` - Fusion RAW + versions traitées par basename
 5. `identify_advanced_image_groups()` - Détection panoramas/HDR/focus
-6. `confirm_groups()` - Confirmation interactive utilisateur
+   (segmentation **deux-niveaux** : série lâche 15 s → panorama, burst serré 2 s →
+   HDR/focus ; classification HDR par ratio d'exposition ; **timestamps
+   sous-seconde** requis, cf. `metadata.py`)
+6. `confirm_groups()` - Confirmation interactive (défaut proposé selon le type
+   auto-détecté : HDR→[H], panorama→[P], burst→[O])
 7. `move_raws_to_folder()` - Organisation des RAW
 8. `create_processed_images()` - Génération AVIF/TIFF depuis RAW
    (groupes HDR → TIFF **display-referred** ; panorama → TIFF **linéaire**)
@@ -341,6 +347,36 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   **Note** : la libraw du build Luminance HDR installé ne lit pas le CR3 (trop récent),
   et sa fusion « linear » sur TIFF linéaires diverge — raisons supplémentaires de
   préférer enfuse pour l'automatisation.
+
+- [x] **Détection de groupes : segmentation deux-niveaux + timestamps sous-seconde**
+  Refonte de `grouping.py` (+ `metadata.py`, `constants.py`).
+
+  **Problème** : l'ancien grouping (seuil unique 15 s, timestamp tronqué à la
+  seconde, soustraction de `exposure_time`) perdait la plupart des brackets HDR :
+  - Les vues d'un burst partagent la même seconde d'horloge → écart tronqué = 0 →
+    `time_diff = 0 − exposure_time < 0` → interprété comme « hors série » → vue exclue.
+  - Un bracket entier tenant dans une seconde → **aucun groupe formé**.
+  - Deux brackets espacés de <15 s → **fusionnés** en un seul groupe.
+
+  **Solution** :
+  - **#1 Sous-seconde** : `metadata.py` lit `SubSecTimeOriginal` et l'ajoute au
+    timestamp (`frac = int(s)/10**len(s)` → microsecondes). Restaure les vrais
+    écarts (~0,33 s) et supprime l'ambiguïté « même seconde ».
+  - **#2 Deux-niveaux** : `MIN_TIME_BETWEEN_PANOS` (15 s) forme les séries
+    (panorama-friendly), puis `MAX_TIME_WITHIN_BURST` (2 s) découpe chaque série
+    en bursts. Série sans burst serré = panorama ; série avec bursts = un groupe
+    par bracket (sépare les brackets consécutifs).
+  - **#3 Classification** : `HDR_EXPOSURE_RATIO` (1,8) → burst dont l'expo varie =
+    « hdr » (sinon « burst »). Suggestion confirmée par l'utilisateur, `[H]/[P]/[O]`
+    proposé par défaut selon le type détecté.
+
+  Rationale détaillée + cas limites connus documentés dans le docstring de module
+  de `grouping.py` (slow AEB vu comme panorama, pano rapide vu comme burst,
+  ladders limites classés « burst », pas d'usage des tags ExposureCompensation/
+  DriveMode — pistes de raffinement futur).
+
+  Validé sur un dossier réel (88 CR3) : 28 groupes détectés, tous les brackets 3
+  vues correctement isolés et pré-classés HDR.
 
 - [ ] **Format HDR compact (archivage du radiance map, optionnel)**
   Le pipeline enfuse ne produit pas de HDR flottant, donc rien à archiver. Si on

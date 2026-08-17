@@ -14,6 +14,21 @@ MIN_TIME_BETWEEN_PANOS = 15  # Can be corrected between 19 and 7.5...
 # 13.5 was considered good for a good time
 # For room panorama, up to 40 s. were needed between 2 shots.
 
+# MAXIMUM time between two frames of the same BURST (HDR / focus bracket / drive
+# burst), in seconds. Continuous-drive brackets are ~0.2-0.5 s apart, far below
+# the panorama cadence. This tight threshold separates consecutive brackets that
+# a single 15 s window would merge, and is used as the second tier of the
+# two-level grouping (tight bursts vs. loose panorama series).
+MAX_TIME_WITHIN_BURST = 2.0
+
+# A tight burst is classified as HDR when its longest/shortest exposure-time
+# ratio reaches this value (exposures deliberately varied across the bracket).
+# Below it, exposures are ~constant → focus bracket or action burst.
+HDR_EXPOSURE_RATIO = 1.8
+
+# Minimum number of frames for a detected group to be kept.
+MIN_GROUP_SIZE = 2
+
 # Folder to which backups of photos will be moved before applying geo-tagging
 # (relative to photo_folder, without final '/'):
 FOLDER_BACKUP_GPS = "BackupBeforeGPS!AE!"

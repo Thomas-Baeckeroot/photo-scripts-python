@@ -24,7 +24,9 @@ class ImageFile:
     exposure_time: Optional[float] = None
     has_gps: bool = False
     group_id: Optional[str] = None      # Group identifier (panorama, HDR, etc.)
-    group_type: Optional[str] = None    # Group type: "panorama", "hdr", "focus", "group"
+    group_type: Optional[str] = None    # Suggested by grouping ("panorama"/"hdr"/"burst"),
+                                        # then confirmed by user to "panorama"/"hdr"/
+                                        # "canceled"/"other" in confirm_groups()
     picture_style: Optional[str] = None # Canon PictureStyle (Standard, Portrait, Landscape, ...)
     color_temperature: Optional[int] = None  # Color temperature in Kelvin (from EXIF)
     lens_model: Optional[str] = None         # EXIF LensModel (e.g. "RF-S18-45mm F4.5-6.3 IS STM")

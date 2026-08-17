@@ -153,6 +153,7 @@ def extract_image_metadata(photo_folder, files):
     # Define EXIF tag constants
     EXIF_DATETIME_ORIGINAL = 'DateTimeOriginal'
     EXIF_DATETIME = 'DateTime'
+    EXIF_SUBSEC_TIME_ORIGINAL = 'SubSecTimeOriginal'
     EXIF_EXPOSURE_TIME = 'ExposureTime'
     EXIF_GPS_INFO = 'GPSInfo'
     EXIF_PICTURE_STYLE = 'PictureStyle'
@@ -186,6 +187,20 @@ def extract_image_metadata(photo_folder, files):
                     file.timestamp = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
                 except ValueError:
                     log.warning(f"Invalid date format in {file.original_filename}: {date_str}")
+
+            # Add sub-second precision to the timestamp (critical for grouping).
+            # DateTimeOriginal has only 1-second resolution, so burst frames shot
+            # within the same clock second become indistinguishable and break
+            # bracket detection. SubSecTimeOriginal holds the fractional part
+            # (e.g. "46" → 0.46 s; frac = int(s) / 10**len(s)).
+            if file.timestamp is not None and EXIF_SUBSEC_TIME_ORIGINAL in exif:
+                subsec_raw = exif[EXIF_SUBSEC_TIME_ORIGINAL]
+                if subsec_raw not in (None, ''):
+                    subsec_str = str(subsec_raw).strip()
+                    if subsec_str.isdigit():
+                        frac = int(subsec_str) / (10 ** len(subsec_str))
+                        file.timestamp = file.timestamp.replace(
+                            microsecond=int(round(frac * 1_000_000)))
 
             # Extract exposure time
             if EXIF_EXPOSURE_TIME in exif:
