@@ -51,6 +51,7 @@ photo-scripts-python/
 │   ├── lens_correction.py          # Lens distortion/vignetting/TCA correction (lensfunpy)
 │   ├── raw_processing.py           # develop_raw(), create_avif, create_tiff (utilise dcp_profile)
 │   ├── panorama.py                 # Assemblage panorama via hsi (Hugin Python bindings)
+│   ├── hdr.py                       # Fusion d'exposition HDR via enfuse (align_image_stack)
 │   ├── geotag.py                   # GPX parsing, géolocalisation
 │   └── pipeline.py                 # sort_photos() orchestrateur
 ├── requirements.txt
@@ -67,7 +68,7 @@ constants    config (→ constants)    models     (feuilles)
       \        |                    /
        display  (→ models)
       /    |    \
-file_ops  metadata  grouping  dcp_profile  lens_correction  geotag  panorama (→ display, metadata)
+file_ops  metadata  grouping  dcp_profile  lens_correction  geotag  panorama  hdr (→ display)
       \       |        |          |             |          /
        \      |        |          |             |         /
         \     |     raw_processing (→ dcp_profile, lens_correction, config, display)
@@ -153,6 +154,12 @@ MIN_TIME_BETWEEN_PANOS = 15  # secondes entre photos d'un même groupe
 6. `confirm_groups()` - Confirmation interactive utilisateur
 7. `move_raws_to_folder()` - Organisation des RAW
 8. `create_processed_images()` - Génération AVIF/TIFF depuis RAW
+   (groupes HDR → TIFF **display-referred** ; panorama → TIFF **linéaire**)
+9. `create_panorama()` / `create_hdr()` - Assemblage des groupes confirmés
+
+`confirm_groups()` propose maintenant `[P]anorama` / `[H]DR` / `[E]dit` /
+`[C]ancel` / `[O]ther`. Un groupe `hdr` reçoit le suffixe `_HDR` et est fusionné
+par `hdr.create_hdr()` (align_image_stack + enfuse « detailed » → AVIF).
 
 ## Tests
 
@@ -300,6 +307,49 @@ Données de test dans `testing/2025-03-15 - Test/` (fichiers CR3 + JPG réels).
   **Note** : le DCP Canon EOS R7 ne contient pas de HueSatMap (tags 50937-50939)
   ni de ForwardMatrix illuminant-dépendante (FM1 = FM2). La correction ColorMatrix
   est donc la seule correction illuminant-dépendante disponible depuis le profil DCP.
+
+- [x] **Fusion HDR (bracketing d'exposition) via enfuse**
+  Implémenté dans `hdr.py` + intégré au pipeline.
+
+  **Choix de conception : exposure fusion (enfuse), pas de radiance map / tone mapping.**
+  enfuse mélange directement les vues développées via une pondération par pixel
+  (bien-exposé + contraste local + saturation). Avantages retenus après comparaison
+  avec Luminance HDR (Mantiuk06/08, Fattal) sur un bracket réel (contre-jour coucher
+  de soleil, −3/0/+3 EV) :
+  - Aucun artefact (pas de halo, pas de « HDR look »), résultat prévisible en batch.
+  - **Aucun fichier `.hdr`/`.exr` produit ni conservé** (pas de gros intermédiaire).
+  - Pas de courbe de réponse caméra à estimer, pas d'étape de tone mapping.
+  - S'appuie sur `enfuse`/`align_image_stack` déjà présents (suite Hugin/enblend).
+  Luminance HDR (Fattal « spectaculaire », Mantiuk08 « propre ») reste pertinent en
+  option manuelle mais pas comme défaut automatique.
+
+  **Points d'implémentation** :
+  - `confirm_groups()` : nouveau choix `[H]DR` → `group_type='hdr'`, suffixe `_HDR`.
+  - `create_processed_images()` : les groupes HDR sont développés en TIFF 16-bit
+    **display-referred** (DCP ToneCurve + gamma BT.709) via
+    `develop_raw(..., display_referred=True)`. **Crucial** : enfuse pondère par
+    bien-exposé (gris moyen ≈ 0.5) → les TIFF *linéaires* du panorama fausseraient la
+    pondération (c'est aussi ce qui faisait diverger Luminance HDR sur données linéaires).
+  - `hdr.create_hdr()` : `align_image_stack -m -C -c 25 -t 2` puis
+    `enfuse --exposure-weight=1.0 --saturation-weight=0.4 --contrast-weight=0.3
+    --hard-mask --exposure-sigma=0.2 --depth=16` → TIFF fusionné → AVIF 8-bit.
+    Intermédiaires (`aligned_*.tif`, TIFF fusionné) supprimés ; TIFF sources conservés.
+  - `pipeline.py` : boucle d'assemblage HDR après les panoramas (avec fallback JPG).
+
+  **Note** : la libraw du build Luminance HDR installé ne lit pas le CR3 (trop récent),
+  et sa fusion « linear » sur TIFF linéaires diverge — raisons supplémentaires de
+  préférer enfuse pour l'automatisation.
+
+- [ ] **Format HDR compact (archivage du radiance map, optionnel)**
+  Le pipeline enfuse ne produit pas de HDR flottant, donc rien à archiver. Si on
+  ajoute un jour un mode « vrai HDR » (radiance map), éviter l'EXR non compressé
+  (énorme). Options compactes, du plus au moins recommandé :
+  - **OpenEXR + compression DWAB/DWAA** (lossy, 10–100× plus petit que PIZ/ZIP) —
+    le « JPEG du HDR flottant », scene-referred.
+  - **JPEG XL** (float HDR, très compact, lossy ou lossless).
+  - **Radiance `.hdr` (RGBE)** : ~4 octets/pixel, plus léger mais précision moindre.
+  - Pour un HDR *display-referred* (pas scene-referred) : **AVIF/HEIF 10–12 bits PQ/HLG**
+    — le vrai « AVIF pour HDR », mais ce n'est pas un radiance map.
 
 - [ ] **Mettre à jour `has_gps` après géotagging**
   - Dans la liste des fichiers, l'attribut `gps` reste à `no` après ajout des infos GPS

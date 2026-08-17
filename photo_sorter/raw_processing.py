@@ -104,7 +104,7 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
                 output_bps=8, output_colorspace="srgb",
                 dark_frame_path=None, tone_curve=None, lookup_table=None,
                 color_correction_matrix=None,
-                lens_correction_params=None):
+                lens_correction_params=None, display_referred=False):
     """
     Develop a RAW file using rawpy (Python binding for libraw).
 
@@ -162,6 +162,12 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
         lens_correction_params: Optional dict with keys 'lens_model', 'focal_length',
                             'aperture' for lensfun-based lens correction (distortion,
                             vignetting, TCA). None to skip lens correction.
+        display_referred:   When True, force BT.709 gamma encoding for TIFF output
+                            (in addition to AVIF). Used for HDR-group frames that
+                            feed enfuse: exposure fusion expects gamma-encoded
+                            (display-referred) input, unlike panorama TIFFs which
+                            stay linear for enblend seam blending. No effect on the
+                            BT.709 pipeline (rawpy already encodes gamma there).
 
     Returns:
         True if the image was created successfully, False otherwise.
@@ -274,11 +280,13 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
             rgb = apply_tone_curve(rgb, tone_curve)
             log.debug(f" ┊                 After tone curve: {rgb.shape}, dtype={rgb.dtype}")
 
-        # BT.709 gamma encoding: required for display output (AVIF).
+        # BT.709 gamma encoding: required for display output (AVIF), and for
+        # display-referred TIFFs feeding enfuse (HDR groups).
         # In the linear pipeline, the tone curve provides tone mapping but not
-        # gamma encoding. We add BT.709 encoding explicitly for AVIF output.
-        # For TIFF: data stays linear (better for panorama/HDR blending in enblend).
-        if use_linear and output_format == "avif":
+        # gamma encoding. We add BT.709 encoding explicitly here.
+        # For panorama TIFFs (display_referred=False): data stays linear
+        # (better seam blending in enblend, no gamma-space artifacts).
+        if use_linear and (output_format == "avif" or display_referred):
             rgb_float = rgb.astype(np.float64) / 65535.0
             rgb_float = _bt709_encode(rgb_float)
             rgb = np.clip(rgb_float * 65535.0, 0, 65535).astype(np.uint16)
@@ -325,14 +333,21 @@ def develop_raw(raw_file_path, output_path, output_format="avif",
 
 
 def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config,
-                               lookup_table=None, color_correction_matrix=None):
+                               lookup_table=None, color_correction_matrix=None,
+                               tone_curve=None, display_referred=False):
     """
     Create a 16-bit TIFF image from a RAW file for panorama/HDR processing.
     Uses develop_raw() with 16-bit sRGB settings. When DCP corrections are
     provided (Phase 2 LookTable + Phase 3 ColorMatrix), they are applied to
     produce device-independent colors with correct white balance.
-    Phase 1 (ToneCurve) is intentionally omitted to keep data suitable for
-    blending (linear response avoids seam artifacts in enblend).
+
+    Two output flavours, selected by *display_referred*:
+      - Panorama (default, display_referred=False): Phase 1 (ToneCurve) is
+        omitted and data stays LINEAR — best for enblend seam blending.
+      - HDR (display_referred=True): the DCP ToneCurve is applied and the data
+        is BT.709 gamma-encoded (display-referred), because enfuse exposure
+        fusion weights pixels by well-exposedness (mid-gray ≈ 0.5) and would
+        mis-weight linear frames.
 
     Args:
         photo_folder (str): Base photo folder path
@@ -341,6 +356,10 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config,
         lookup_table: Optional (90, 16, 16, 3) numpy array of HSV corrections (Phase 2)
         color_correction_matrix: Optional (3, 3) numpy array for Phase 3 illuminant
                                  correction. None for D65 (daylight) scenes.
+        tone_curve: Optional Nx2 numpy array of DCP tone curve control points (Phase 1).
+                    Only meaningful with display_referred=True (HDR groups).
+        display_referred: When True, produce a gamma-encoded TIFF for enfuse (HDR).
+                          When False, keep linear data for enblend (panorama).
 
     Returns:
         ImageFile: Updated file entry with processed file info
@@ -364,8 +383,10 @@ def create_tiff_16bit_from_raw(photo_folder, file_entry, app_config,
         output_bps=16,                  # 16-bit for maximum dynamic range
         output_colorspace="srgb",       # sRGB: corrections pipeline is designed for sRGB
         dark_frame_path=app_config.dark_frame_path,
+        tone_curve=tone_curve if display_referred else None,
         lookup_table=lookup_table,
         color_correction_matrix=color_correction_matrix,
+        display_referred=display_referred,
     )
 
     if success:
@@ -485,14 +506,17 @@ def create_processed_images(photo_folder, files, app_config):
                         file_entry.color_temperature)
 
                 if file_entry.group_id:
+                    is_hdr = file_entry.group_type == "hdr"
                     log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
                               f"for group '{file_entry.group_id}' "
-                              f"(color_temp={file_entry.color_temperature}K, "
+                              f"({'HDR display-referred' if is_hdr else 'linear'}, "
+                              f"color_temp={file_entry.color_temperature}K, "
                               f"ccm={'yes' if ccm is not None else 'no'})")
                     file_entry = create_tiff_16bit_from_raw(
                         photo_folder, file_entry, app_config,
                         lookup_table=lookup_table,
-                        color_correction_matrix=ccm)
+                        color_correction_matrix=ccm,
+                        tone_curve=tone_curve, display_referred=is_hdr)
                 else:
                     lcp = _build_lens_params(file_entry)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "
@@ -530,15 +554,18 @@ def create_processed_images(photo_folder, files, app_config):
                         file_entry.color_temperature)
 
                 if file_entry.group_id:
+                    is_hdr = file_entry.group_type == "hdr"
                     log.debug(f" ├→ Create tiff from '{file_entry.raw_filename}' "
                               f"for group '{file_entry.group_id}' "
-                              f"(PictureStyle='{style}', "
+                              f"({'HDR display-referred' if is_hdr else 'linear'}, "
+                              f"PictureStyle='{style}', "
                               f"color_temp={file_entry.color_temperature}K, "
                               f"ccm={'yes' if ccm is not None else 'no'})")
                     file_entry = create_tiff_16bit_from_raw(
                         photo_folder, file_entry, app_config,
                         lookup_table=lut,
-                        color_correction_matrix=ccm)
+                        color_correction_matrix=ccm,
+                        tone_curve=tc, display_referred=is_hdr)
                 else:
                     lcp = _build_lens_params(file_entry)
                     log.debug(f" ├→ Create avif from '{file_entry.raw_filename}' "

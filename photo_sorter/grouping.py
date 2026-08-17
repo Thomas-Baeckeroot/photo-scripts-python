@@ -316,17 +316,23 @@ def confirm_groups(files):
             # Ask if this group is confirmed as a Panorama, or Canceled, or something else:
             print(f"What should be done with this group? '{sub_folder_name}' ")
             print("- [P]anorama: keep group, generate png, create Hugin script (default)")
+            print("- [H]DR: keep group, fuse the bracketed exposures with enfuse")
             print("- [E]dit panorama: change images in this group")
             print("- [C]ancel: images were incorrectly detected as a group")
             print("- [O]ther: group is correct but not a panorama:"
                   " keep group, generate png but do not create Hugin script")
-            choice = input("\nEnter your choice [P/E/C/O]:")
+            choice = input("\nEnter your choice [P/H/E/C/O]:")
             if choice.lower() == "e":
                 _edit_group(files, group_id, serie_of_photos)
                 continue
             elif choice.lower() == "p" or choice == "":
                 log.info("Group confirmed as Panorama")
                 choice = "panorama"
+            elif choice.lower() == "h":
+                log.info("Group confirmed as HDR")
+                # Recompute the subfolder name with the _HDR suffix
+                sub_folder_name = create_sub_folder_name(serie_of_photos, True)
+                choice = "hdr"
             elif choice.lower() == "c":
                 log.info("Group confirmed as Canceled")
                 sub_folder_name = None
