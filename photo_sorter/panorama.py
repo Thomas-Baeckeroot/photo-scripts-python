@@ -613,22 +613,22 @@ def convert_tiff_to_avif(tiff_path, avif_path, quality=80):
 
     try:
         Image.MAX_IMAGE_PIXELS = None  # Panoramas can exceed Pillow's default limit
-        img = Image.open(tiff_path)
-        log.debug(f"Read TIFF: mode={img.mode}, size={img.size}")
-
-        # Drop alpha channel if present (enblend may add one)
-        if img.mode in ('RGBA', 'LA', 'PA'):
-            img = img.convert('RGB')
-        elif img.mode != 'RGB':
-            img = img.convert('RGB')
+        # Open inside a context manager and force a full load so Pillow's file
+        # handle is released before the caller deletes the TIFF. Otherwise, on a
+        # network filesystem (NAS over SMB/NFS), the still-open file makes the
+        # subsequent os.remove() fail with EBUSY ("Device or resource busy").
+        with Image.open(tiff_path) as img:
+            img.load()
+            log.debug(f"Read TIFF: mode={img.mode}, size={img.size}")
+            # Drop alpha channel if present (enblend may add one)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img_data = np.array(img)
 
         # Convert 16-bit to 8-bit if needed
-        img_data = np.array(img)
         if img_data.dtype == np.uint16:
             img_data = (img_data / 256).astype(np.uint8)
-            img = Image.fromarray(img_data)
-
-        img.save(avif_path, 'AVIF', quality=quality, speed=6)
+        Image.fromarray(img_data).save(avif_path, 'AVIF', quality=quality, speed=6)
 
         log.info(f"Converted to AVIF: '{avif_path}'")
         return True
@@ -767,8 +767,11 @@ def create_panorama(pano_folder):
     # --- Convert TIFF → AVIF ---
     avif_path = os.path.join(parent_dir, f"{folder_name}.avif")
     if convert_tiff_to_avif(output_path, avif_path):
-        os.remove(output_path)
-        log.info(f"Removed intermediate TIFF: '{output_path}'")
+        try:
+            os.remove(output_path)   # non-fatal: AVIF is already written
+            log.info(f"Removed intermediate TIFF: '{output_path}'")
+        except OSError as e:
+            log.warning(f"Could not remove intermediate TIFF '{output_path}': {e}")
         output_path = avif_path
     else:
         log.warning(f"AVIF conversion failed. Keeping TIFF: '{output_path}'")

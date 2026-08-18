@@ -35,6 +35,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 
 import numpy as np
 from PIL import Image
@@ -216,18 +217,23 @@ def convert_tiff_to_avif(tiff_path, avif_path, quality=AVIF_QUALITY):
     """
     try:
         Image.MAX_IMAGE_PIXELS = None
-        img = Image.open(tiff_path)
-        log.debug(f"Read TIFF: mode={img.mode}, size={img.size}")
+        # Open inside a context manager and force a full load, so Pillow's file
+        # handle is released before the caller deletes the TIFF. Pillow opens
+        # images lazily (and may mmap), keeping the file open until it is fully
+        # read or closed. On a network filesystem (NAS over SMB/NFS) deleting a
+        # file that is still open by the same process fails with EBUSY
+        # ("Device or resource busy") — a sharing violation — which previously
+        # crashed the pipeline right after a successful AVIF conversion.
+        with Image.open(tiff_path) as img:
+            img.load()
+            log.debug(f"Read TIFF: mode={img.mode}, size={img.size}")
+            if img.mode != 'RGB':
+                img = img.convert('RGB')   # also drops enfuse's alpha channel
+            img_data = np.array(img)
 
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-
-        img_data = np.array(img)
         if img_data.dtype == np.uint16:
             img_data = (img_data / 256).astype(np.uint8)
-            img = Image.fromarray(img_data)
-
-        img.save(avif_path, 'AVIF', quality=quality, speed=6)
+        Image.fromarray(img_data).save(avif_path, 'AVIF', quality=quality, speed=6)
         log.info(f"Converted to AVIF: '{avif_path}'")
         return True
 
@@ -240,14 +246,37 @@ def convert_tiff_to_avif(tiff_path, avif_path, quality=AVIF_QUALITY):
 # Cleanup
 # ---------------------------------------------------------------------------
 
+def remove_with_retry(path, attempts=5, delay=1.0):
+    """
+    Delete *path*, tolerating slow/network filesystems.
+
+    A large file just closed by Pillow can briefly report EBUSY on a NAS
+    (SMB/NFS); retry a few times with a short delay. A cleanup failure is never
+    fatal — the caller has already produced the real output, so we log a warning
+    and move on rather than aborting the whole run.
+
+    Returns True if the file is gone (removed or already absent), else False.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            os.remove(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            if attempt == attempts:
+                log.warning(f"Could not remove '{path}' after {attempts} attempts: {e}")
+                return False
+            log.debug(f"Remove '{path}' busy (attempt {attempt}/{attempts}): {e}; retrying in {delay}s...")
+            time.sleep(delay)
+    return False
+
+
 def cleanup_intermediate_files(files):
     """Remove intermediate files (aligned frames)."""
     for f in files:
-        try:
-            os.remove(f)
+        if remove_with_retry(f):
             log.debug(f"Removed intermediate file: {f}")
-        except OSError as e:
-            log.warning(f"Could not remove '{f}': {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +337,7 @@ def create_hdr(hdr_folder):
     # --- Convert TIFF → AVIF ---
     avif_path = os.path.join(parent_dir, f"{folder_name}.avif")
     if convert_tiff_to_avif(fused_tiff, avif_path):
-        os.remove(fused_tiff)
-        log.debug(f"Removed intermediate fused TIFF: '{fused_tiff}'")
+        remove_with_retry(fused_tiff)   # non-fatal: AVIF is already written
         output_path = avif_path
     else:
         log.warning(f"AVIF conversion failed. Keeping fused TIFF: '{fused_tiff}'")
