@@ -1,0 +1,7 @@
+Pillow>=11.0         # Image manipulation (AVIF/JPEG read/write, 8-bit)
+rawpy>=0.22          # Python binding for libraw (RAW demosaicing engine)
+numpy>=1.26          # Array manipulation (rawpy output → PIL/tifffile conversion)
+tifffile>=2024.0     # 16-bit RGB TIFF write + DCP profile reading (TIFF-based format)
+imagecodecs>=2024.0  # 10-bit AVIF encoding (Pillow only supports 8-bit AVIF)
+lensfunpy>=1.18      # Lens distortion/vignetting/TCA correction (wraps liblensfun)
+opencv-python-headless>=4.9  # cv2.remap() for geometric distortion correction
